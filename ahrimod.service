@@ -1,0 +1,65 @@
+[Unit]
+Description=Ahrimod — Telegram moderation bot for AhriVPN
+Documentation=https://github.com/ahrivpn/ahrimod
+After=network-online.target
+Wants=network-online.target
+# Лимит на частоту перезапусков: не больше 5 крашей за 5 минут,
+# иначе systemd пометит сервис как failed и перестанет рестартить.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=simple
+
+# Под каким пользователем работаем
+User=ahrimod
+Group=ahrimod
+
+# Где лежит проект
+WorkingDirectory=/opt/ahrimod
+
+# Запуск через venv
+ExecStart=/opt/ahrimod/venv/bin/python /opt/ahrimod/main.py
+
+# Перезапуск при падениях
+Restart=always
+RestartSec=10
+
+# Окружение
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+
+# Логирование в journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ahrimod
+
+# Таймаут штатной остановки
+TimeoutStopSec=15
+KillMode=mixed
+KillSignal=SIGINT
+
+# ── Безопасность (sandbox) ──
+# Всё лишнее — запрещено. Бот пишет только в свою data-папку.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectKernelLogs=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+# Разрешаем запись только в data/ внутри проекта
+ReadWritePaths=/opt/ahrimod/data
+
+[Install]
+WantedBy=multi-user.target

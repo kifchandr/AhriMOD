@@ -1,0 +1,122 @@
+# -*- coding: utf-8 -*-
+"""Извлечение ссылок из Telegram-сообщений со всеми типами entities."""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Iterable, Optional
+from urllib.parse import urlparse
+
+from aiogram.types import Message, MessageEntity
+
+from .text_normalizer import normalize_domain, normalize_for_compare
+
+
+# Регулярки по тексту — на случай если entities не распарсились
+# (например, ссылка специально написана с пробелами или необычной TLD).
+_URL_RE = re.compile(
+    r"""(?xi)
+    \b
+    (?:https?://|tg://|ftp://)?           # схема (опционально)
+    (?:[a-z0-9-]+\.)+                     # поддомены
+    [a-z]{2,24}                           # TLD
+    (?:[/?\#][^\s<>"']*)?                 # путь/query
+    """,
+)
+
+# username-упоминания каналов/ботов: @channel_name (минимум 5 символов как у Telegram)
+_USERNAME_RE = re.compile(r"(?<![\w@])@([a-zA-Z][a-zA-Z0-9_]{4,31})")
+
+
+@dataclass(slots=True)
+class ExtractedLink:
+    """Найденная ссылка."""
+    raw: str           # как было в сообщении
+    domain: str        # нормализованный домен (может быть '' если не парсится)
+    is_telegram: bool  # это ссылка на t.me / @channel / tg://
+
+
+def _domain_from_url(url: str) -> str:
+    """Парсит URL и возвращает нормализованный домен."""
+    if not url:
+        return ""
+    # urlparse требует схему
+    if "://" not in url:
+        url = "http://" + url.lstrip("/")
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return ""
+    return normalize_domain(parsed.hostname or "")
+
+
+def _is_telegram_domain(domain: str) -> bool:
+    return domain in {"t.me", "telegram.me", "telegram.dog"} or domain.endswith(".t.me")
+
+
+def extract_links(message: Message) -> list[ExtractedLink]:
+    """
+    Извлекает все ссылки из сообщения.
+    Источники:
+      1. message.entities / message.caption_entities (url, text_link, mention)
+      2. Регулярка по нормализованному тексту (на случай скрытых через гомоглифы)
+      3. message.forward_from_chat / forward_origin — пересылка из канала
+      4. Inline-кнопки с url (reply_markup)
+    """
+    text = message.text or message.caption or ""
+    entities = list(message.entities or []) + list(message.caption_entities or [])
+    found: dict[tuple[str, str], ExtractedLink] = {}
+
+    def add(raw: str, domain: str, is_tg: bool) -> None:
+        key = (raw, domain)
+        if key not in found:
+            found[key] = ExtractedLink(raw=raw, domain=domain, is_telegram=is_tg)
+
+    # 1. Entities
+    for ent in entities:
+        if ent.type == "url":
+            raw = text[ent.offset : ent.offset + ent.length]
+            domain = _domain_from_url(raw)
+            if domain:
+                add(raw, domain, _is_telegram_domain(domain))
+        elif ent.type == "text_link" and ent.url:
+            domain = _domain_from_url(ent.url)
+            if domain:
+                add(ent.url, domain, _is_telegram_domain(domain))
+        elif ent.type == "mention":
+            raw = text[ent.offset : ent.offset + ent.length]  # @username
+            username = raw.lstrip("@")
+            add(raw, f"t.me/{username.lower()}", True)
+        elif ent.type == "text_mention" and ent.user:
+            add(f"tg://user?id={ent.user.id}", "tg.user", True)
+
+    # 2. Регулярка по нормализованному тексту (ловим обфусцированное)
+    normalized = normalize_for_compare(text)
+    for m in _URL_RE.finditer(normalized):
+        raw = m.group(0)
+        domain = _domain_from_url(raw)
+        if domain:
+            add(raw, domain, _is_telegram_domain(domain))
+
+    # @username упоминания через regex (если entities их не дали)
+    for m in _USERNAME_RE.finditer(normalized):
+        username = m.group(1).lower()
+        # @admin / @everyone и подобное — пропустим короткие
+        add(f"@{username}", f"t.me/{username}", True)
+
+    # 3. Forward из канала — это де-факто реклама канала
+    fwd_chat = getattr(message, "forward_from_chat", None)
+    if fwd_chat and getattr(fwd_chat, "username", None):
+        username = fwd_chat.username.lower()
+        add(f"forward:@{username}", f"t.me/{username}", True)
+
+    # 4. Inline-кнопки в reply_markup
+    if message.reply_markup and message.reply_markup.inline_keyboard:
+        for row in message.reply_markup.inline_keyboard:
+            for btn in row:
+                if btn.url:
+                    domain = _domain_from_url(btn.url)
+                    if domain:
+                        add(btn.url, domain, _is_telegram_domain(domain))
+
+    return list(found.values())

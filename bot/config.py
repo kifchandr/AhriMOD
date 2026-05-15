@@ -1,0 +1,126 @@
+# -*- coding: utf-8 -*-
+"""Конфигурация бота, читается из .env."""
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Annotated, List, Literal
+
+from pydantic import Field, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
+
+# Корень проекта — папка ahrimod/, на 2 уровня выше этого файла:
+#   .../ahrimod/bot/config.py  →  parents[1] = .../ahrimod/
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+class Settings(BaseSettings):
+    # Абсолютный путь к .env — не зависит от текущей рабочей директории.
+    # Это важно при ручном запуске из произвольной cwd (через systemd cwd
+    # выставлен в WorkingDirectory, но при отладке может быть любым).
+    model_config = SettingsConfigDict(
+        env_file=str(ENV_FILE),
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    bot_token: str = Field(..., alias="BOT_TOKEN")
+    admin_chat_id: int = Field(..., alias="ADMIN_CHAT_ID")
+    # Опционально: ID темы внутри admin-чата (если это форум-группа).
+    # 0 или пусто = писать в общий раздел.
+    admin_chat_thread_id: int = Field(0, alias="ADMIN_CHAT_THREAD_ID")
+    log_chat_id: int = Field(..., alias="LOG_CHAT_ID")
+    log_chat_thread_id: int = Field(0, alias="LOG_CHAT_THREAD_ID")
+    # NoDecode: pydantic-settings не пытается сам парсить значение
+    # (по умолчанию пытается через JSON и падает на "111,222").
+    # Передаём сырую строку в валидатор _split_ids ниже.
+    protected_chat_ids: Annotated[List[int], NoDecode] = Field(
+        default_factory=list, alias="PROTECTED_CHAT_IDS"
+    )
+    admin_user_ids: Annotated[List[int], NoDecode] = Field(
+        default_factory=list, alias="ADMIN_USER_IDS"
+    )
+
+    trust_min_hours: int = Field(24, alias="TRUST_MIN_HOURS")
+    trust_min_messages: int = Field(3, alias="TRUST_MIN_MESSAGES")
+    trust_min_interval_minutes: int = Field(60, alias="TRUST_MIN_INTERVAL_MINUTES")
+
+    db_path: Path = Field(Path("./data/bot.db"), alias="DB_PATH")
+
+    use_cas: bool = Field(True, alias="USE_CAS")
+    simhash_threshold: int = Field(4, alias="SIMHASH_THRESHOLD")
+    signature_min_length: int = Field(30, alias="SIGNATURE_MIN_LENGTH")
+
+    new_user_punishment: Literal["ban", "mute"] = Field("ban", alias="NEW_USER_PUNISHMENT")
+    mute_duration_minutes: int = Field(60, alias="MUTE_DURATION_MINUTES")
+
+    # ── Предупреждения и эскалация наказаний ──
+    # При WARN_RESET_TRUST_AT — обнуляется путь к доверию (юзер становится новым)
+    warn_reset_trust_at: int = Field(3, alias="WARN_RESET_TRUST_AT")
+    # При WARN_MUTE_AT — авто-мут на WARN_MUTE_HOURS
+    warn_mute_at: int = Field(5, alias="WARN_MUTE_AT")
+    warn_mute_hours: int = Field(24, alias="WARN_MUTE_HOURS")
+    # При WARN_BAN_AT — бан
+    warn_ban_at: int = Field(7, alias="WARN_BAN_AT")
+    # Через сколько дней предупреждение автоматически списывается
+    warn_ttl_days: int = Field(7, alias="WARN_TTL_DAYS")
+    # Слать ли в чат уведомление о выдаче предупреждения
+    notify_on_warn: bool = Field(True, alias="NOTIFY_ON_WARN")
+    # Через сколько секунд удалять уведомление о предупреждении (0 = не удалять)
+    warn_notification_ttl_seconds: int = Field(60, alias="WARN_NOTIFICATION_TTL_SECONDS")
+
+    # ── Бэкап БД ──
+    backup_enabled: bool = Field(True, alias="BACKUP_ENABLED")
+    # 0 = использовать ADMIN_CHAT_ID
+    backup_chat_id: int = Field(0, alias="BACKUP_CHAT_ID")
+    # 0 = General тема (или не форум-чат)
+    backup_thread_id: int = Field(0, alias="BACKUP_THREAD_ID")
+    # Час по UTC когда делать ежедневный бэкап (0..23)
+    backup_hour: int = Field(4, alias="BACKUP_HOUR")
+    # Сколько дней хранить локальные бэкапы в data/backups/
+    backup_keep_days: int = Field(30, alias="BACKUP_KEEP_DAYS")
+
+    # ── Дополнительные ограничения для не-доверенных ──
+    # Запретить новым/не-доверенным юзерам отправлять фото, видео, кружки, gif
+    restrict_media_for_untrusted: bool = Field(True, alias="RESTRICT_MEDIA_FOR_UNTRUSTED")
+
+    # ── FAQ ──
+    # Минимальный интервал между двумя срабатываниями одной FAQ записи (минуты)
+    faq_cooldown_minutes: int = Field(10, alias="FAQ_COOLDOWN_MINUTES")
+
+    # ── Reactions-as-moderation ──
+    # Сколько дней хранить map (chat_id, message_id) → user_id для реакций.
+    recent_messages_ttl_days: int = Field(7, alias="RECENT_MESSAGES_TTL_DAYS")
+
+    # ── Уведомления о новых участниках ──
+    # Слать ли в лог-чат уведомление при вступлении нового юзера
+    # (после фильтров CAS и имя-спам). Полезно мониторить кто заходит.
+    notify_on_new_member: bool = Field(False, alias="NOTIFY_ON_NEW_MEMBER")
+    # Отдельная тема в лог-чате для этих уведомлений (0 = в LOG_CHAT_THREAD_ID)
+    new_member_thread_id: int = Field(0, alias="NEW_MEMBER_THREAD_ID")
+
+    @field_validator("protected_chat_ids", "admin_user_ids", mode="before")
+    @classmethod
+    def _split_ids(cls, v):
+        if v is None or v == "":
+            return []
+        if isinstance(v, str):
+            return [int(x.strip()) for x in v.split(",") if x.strip()]
+        if isinstance(v, int):
+            return [v]
+        if isinstance(v, (list, tuple)):
+            return [int(x) for x in v]
+        return v
+
+    @field_validator("db_path", mode="after")
+    @classmethod
+    def _resolve_db_path(cls, v: Path) -> Path:
+        # Относительные пути считаем от корня проекта, а не от cwd
+        if not v.is_absolute():
+            return (PROJECT_ROOT / v).resolve()
+        return v
+
+
+settings = Settings()
