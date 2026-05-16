@@ -123,4 +123,124 @@ class Settings(BaseSettings):
         return v
 
 
-settings = Settings()
+# Какие настройки можно менять в runtime через /menu и /setcfg.
+# Ключи .env (BOT_TOKEN, ADMIN_CHAT_ID, ...) сюда не включаются — их
+# нельзя менять без рестарта (бот заходит в Telegram под токеном и
+# слушает конкретные чаты).
+RUNTIME_FIELDS: dict[str, type] = {
+    # Доверие
+    "trust_min_hours": int,
+    "trust_min_messages": int,
+    "trust_min_interval_minutes": int,
+    # Фильтры
+    "use_cas": bool,
+    "simhash_threshold": int,
+    "signature_min_length": int,
+    # Наказания
+    "new_user_punishment": str,
+    "mute_duration_minutes": int,
+    # Эскалация предупреждений
+    "warn_reset_trust_at": int,
+    "warn_mute_at": int,
+    "warn_mute_hours": int,
+    "warn_ban_at": int,
+    "warn_ttl_days": int,
+    "notify_on_warn": bool,
+    "warn_notification_ttl_seconds": int,
+    # Бэкап
+    "backup_enabled": bool,
+    "backup_chat_id": int,
+    "backup_thread_id": int,
+    "backup_hour": int,
+    "backup_keep_days": int,
+    # Прочее
+    "restrict_media_for_untrusted": bool,
+    "faq_cooldown_minutes": int,
+    "recent_messages_ttl_days": int,
+    "notify_on_new_member": bool,
+    "new_member_thread_id": int,
+}
+
+
+def _coerce(raw: str, target_type: type):
+    """Преобразование строкового значения из БД к нужному типу."""
+    if target_type is bool:
+        return raw.strip().lower() in ("1", "true", "yes", "on", "да")
+    if target_type is int:
+        return int(raw)
+    if target_type is float:
+        return float(raw)
+    return raw
+
+
+class RuntimeSettings:
+    """
+    Обёртка над статическим Settings. Атрибуты из RUNTIME_FIELDS могут быть
+    переопределены значениями из таблицы `settings` в БД. Остальные —
+    только из .env (Settings).
+    """
+    __slots__ = ("_defaults", "_overrides")
+
+    def __init__(self, defaults: "Settings"):
+        # Используем object.__setattr__ потому что __setattr__ переопределён
+        object.__setattr__(self, "_defaults", defaults)
+        object.__setattr__(self, "_overrides", {})
+
+    async def reload_from_db(self) -> int:
+        """
+        Перечитывает БД и заполняет кэш переопределений.
+        Возвращает количество загруженных значений.
+        """
+        from .db.repositories import SettingsRepo
+        rows = await SettingsRepo.get_all()
+        new_overrides: dict = {}
+        for key, raw in rows.items():
+            target = RUNTIME_FIELDS.get(key)
+            if target is None:
+                continue
+            try:
+                new_overrides[key] = _coerce(raw, target)
+            except Exception:
+                pass
+        object.__setattr__(self, "_overrides", new_overrides)
+        return len(new_overrides)
+
+    async def update(self, key: str, value, updated_by: Optional[int]) -> None:
+        """Сохраняет в БД и обновляет кэш. Значение приводится к типу из RUNTIME_FIELDS."""
+        from .db.repositories import SettingsRepo
+        target = RUNTIME_FIELDS.get(key)
+        if target is None:
+            raise KeyError(f"{key} не в RUNTIME_FIELDS")
+        if not isinstance(value, target):
+            value = _coerce(str(value), target)
+        await SettingsRepo.set(key, str(value), updated_by)
+        self._overrides[key] = value
+
+    async def reset(self, key: str) -> None:
+        """Удаляет переопределение — настройка вернётся к значению из .env."""
+        from .db.repositories import SettingsRepo
+        await SettingsRepo.delete(key)
+        self._overrides.pop(key, None)
+
+    def current(self, key: str):
+        """Текущее значение настройки (с учётом override)."""
+        if key in self._overrides:
+            return self._overrides[key]
+        return getattr(self._defaults, key)
+
+    def is_overridden(self, key: str) -> bool:
+        return key in self._overrides
+
+    def __getattr__(self, name: str):
+        # __getattr__ вызывается только если обычный lookup не нашёл атрибут.
+        # _defaults и _overrides доступны через __slots__ — попадаем сюда
+        # только для обычных полей.
+        overrides = object.__getattribute__(self, "_overrides")
+        if name in overrides:
+            return overrides[name]
+        return getattr(object.__getattribute__(self, "_defaults"), name)
+
+
+from typing import Optional  # noqa: E402
+
+settings = RuntimeSettings(Settings())

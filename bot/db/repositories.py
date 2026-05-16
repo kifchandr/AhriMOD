@@ -818,3 +818,40 @@ class RecentMessagesRepo:
         )
         await db.conn.commit()
         return cur.rowcount
+
+
+# ────────────────────────────── Runtime-настройки ──────────────────────────────
+
+class SettingsRepo:
+    @staticmethod
+    async def get(key: str) -> Optional[str]:
+        async with db.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row["value"] if row else None
+
+    @staticmethod
+    async def get_all() -> dict[str, str]:
+        async with db.conn.execute(
+            "SELECT key, value FROM settings"
+        ) as cur:
+            return {r["key"]: r["value"] async for r in cur}
+
+    @staticmethod
+    async def set(key: str, value: str, updated_by: Optional[int]) -> None:
+        await db.conn.execute(
+            "INSERT INTO settings(key, value, updated_at, updated_by) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET "
+            "value = excluded.value, updated_at = excluded.updated_at, "
+            "updated_by = excluded.updated_by",
+            (key, value, _now(), updated_by),
+        )
+        await db.conn.commit()
+
+    @staticmethod
+    async def delete(key: str) -> bool:
+        cur = await db.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        await db.conn.commit()
+        return cur.rowcount > 0

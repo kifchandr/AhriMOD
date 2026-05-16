@@ -73,7 +73,8 @@ from aiogram.enums import ParseMode
 from bot.config import settings
 from bot.db.database import db, Database
 from bot.handlers import (
-    admin_commands, forum_topics, messages, moderation_callbacks, new_member, reactions,
+    admin_commands, config_menu, forum_topics, messages,
+    moderation_callbacks, new_member, reactions,
 )
 from bot.middlewares.user_loader import UserLoaderMiddleware
 from bot.services.content_filter import word_filter
@@ -93,6 +94,11 @@ async def main() -> None:
     db.path = new_db.path
     await db.connect()
     log.info("[green]DB подключена[/]: %s", settings.db_path)
+
+    # Загружаем runtime-настройки из БД (переопределения над .env)
+    n_overrides = await settings.reload_from_db()
+    if n_overrides:
+        log.info("Загружено runtime-настроек из БД: %d", n_overrides)
 
     # Сервисы
     init_signature_service(
@@ -122,6 +128,7 @@ async def main() -> None:
     dp.callback_query.middleware(UserLoaderMiddleware())
 
     # Роутеры — порядок важен: команды раньше общего обработчика сообщений
+    dp.include_router(config_menu.router)
     dp.include_router(admin_commands.router)
     dp.include_router(moderation_callbacks.router)
     dp.include_router(new_member.router)

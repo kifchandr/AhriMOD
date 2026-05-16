@@ -130,6 +130,15 @@ CREATE TABLE IF NOT EXISTS recent_messages (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_recent_msg_created ON recent_messages(created_at);
+
+-- Runtime-настройки. Значения переопределяют значения из .env / Settings.
+-- Хранятся как строки, кастятся в нужный тип в RuntimeSettings.reload().
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_at  INTEGER NOT NULL,
+    updated_by  INTEGER
+);
 """
 
 
