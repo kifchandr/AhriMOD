@@ -1,6 +1,6 @@
 [Unit]
 Description=Ahrimod — Telegram moderation bot for AhriVPN
-Documentation=https://github.com/ahrivpn/ahrimod
+Documentation=https://github.com/kifchandr/AhriMOD
 After=network-online.target
 Wants=network-online.target
 # Лимит на частоту перезапусков: не больше 5 крашей за 5 минут,
@@ -11,23 +11,26 @@ StartLimitBurst=5
 [Service]
 Type=simple
 
-# Под каким пользователем работаем
-User=ahrimod
-Group=ahrimod
+# Запускается от root (т.к. лежит в /root/AhriMOD)
+User=root
+Group=root
 
 # Где лежит проект
-WorkingDirectory=/opt/ahrimod
+WorkingDirectory=/root/AhriMOD
 
 # Запуск через venv
-ExecStart=/opt/ahrimod/venv/bin/python /opt/ahrimod/main.py
+ExecStart=/root/AhriMOD/venv/bin/python /root/AhriMOD/main.py
 
 # Перезапуск при падениях
 Restart=always
 RestartSec=10
 
-# Окружение
+# Окружение. FORCE_COLOR=1 включает цветной rich-вывод в journald,
+# который иначе считается не-TTY и режет ANSI-коды.
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=FORCE_COLOR=1
+Environment=TERM=xterm-256color
 
 # Логирование в journald
 StandardOutput=journal
@@ -38,28 +41,6 @@ SyslogIdentifier=ahrimod
 TimeoutStopSec=15
 KillMode=mixed
 KillSignal=SIGINT
-
-# ── Безопасность (sandbox) ──
-# Всё лишнее — запрещено. Бот пишет только в свою data-папку.
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectSystem=strict
-ProtectHome=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-ProtectKernelLogs=true
-ProtectClock=true
-ProtectHostname=true
-ProtectProc=invisible
-RestrictNamespaces=true
-RestrictRealtime=true
-RestrictSUIDSGID=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-SystemCallArchitectures=native
-# Разрешаем запись только в data/ внутри проекта
-ReadWritePaths=/opt/ahrimod/data
 
 [Install]
 WantedBy=multi-user.target
