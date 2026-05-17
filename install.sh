@@ -3,7 +3,7 @@
 # Ahrimod — автоустановка на Ubuntu 22.04 / 24.04
 # Устанавливается в /root/AhriMOD, работает от root.
 # Использование:
-#   curl -fsSL https://raw.githubusercontent.com/kifchandr/AhriMOD/main/install.sh -o install.sh
+#   curl -fsSL https://raw.githubusercontent.com/kifchandr/AhriMOD/master/install.sh -o install.sh
 #   sudo bash install.sh
 # -----------------------------------------------------------------------------
 set -euo pipefail

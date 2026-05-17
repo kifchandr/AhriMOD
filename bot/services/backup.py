@@ -73,9 +73,11 @@ async def cleanup_old_backups(keep_days: int) -> int:
 
 async def send_backup(bot: Bot, manual: bool = False) -> Optional[Path]:
     """
-    Делает бэкап и отправляет в BACKUP_CHAT_ID/BACKUP_THREAD_ID
-    (fallback на ADMIN_CHAT_ID если BACKUP_CHAT_ID не задан).
-    Возвращает путь к локальному .gz файлу, или None если отключено/ошибка.
+    Делает локальный бэкап БД. Отправляет в Telegram только если
+    BACKUP_CHAT_ID явно задан (≠ 0). Если не задан — только локально,
+    чтобы случайно не отправить в админ-чат или модерируемый чат.
+
+    Возвращает путь к локальному .gz файлу, или None если бэкап отключён.
     """
     if not settings.backup_enabled:
         logger.info("Бэкап отключён (BACKUP_ENABLED=false)")
@@ -84,7 +86,19 @@ async def send_backup(bot: Bot, manual: bool = False) -> Optional[Path]:
     gz_path = await make_backup()
     size_kb = gz_path.stat().st_size // 1024
 
-    target_chat_id = settings.backup_chat_id or settings.admin_chat_id
+    target_chat_id = settings.backup_chat_id
+    if not target_chat_id:
+        logger.info(
+            "Бэкап сохранён локально: %s (%d KB). "
+            "Чтобы получать в Telegram — задай BACKUP_CHAT_ID через /menu или /setcfg.",
+            gz_path, size_kb,
+        )
+        # Cleanup всё равно делаем
+        removed = await cleanup_old_backups(settings.backup_keep_days)
+        if removed:
+            logger.info("Удалено старых локальных бэкапов: %d", removed)
+        return gz_path
+
     kwargs: dict = {}
     if settings.backup_thread_id:
         kwargs["message_thread_id"] = settings.backup_thread_id
@@ -96,13 +110,20 @@ async def send_backup(bot: Bot, manual: bool = False) -> Optional[Path]:
         f"💾 {size_kb} KB (gzip)"
     )
 
-    await bot.send_document(
-        chat_id=target_chat_id,
-        document=FSInputFile(str(gz_path)),
-        caption=caption,
-        parse_mode="HTML",
-        **kwargs,
-    )
+    try:
+        await bot.send_document(
+            chat_id=target_chat_id,
+            document=FSInputFile(str(gz_path)),
+            caption=caption,
+            parse_mode="HTML",
+            **kwargs,
+        )
+    except Exception as e:
+        logger.error(
+            "Не удалось отправить бэкап в чат %s (thread %s): %s. "
+            "Локальный файл сохранён: %s",
+            target_chat_id, settings.backup_thread_id, e, gz_path,
+        )
 
     removed = await cleanup_old_backups(settings.backup_keep_days)
     if removed:

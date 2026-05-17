@@ -48,7 +48,7 @@
 ## 1. Установка одной командой
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/kifchandr/AhriMOD/main/install.sh -o /tmp/install.sh
+curl -fsSL https://raw.githubusercontent.com/kifchandr/AhriMOD/master/install.sh -o /tmp/install.sh
 sudo bash /tmp/install.sh
 ```
 

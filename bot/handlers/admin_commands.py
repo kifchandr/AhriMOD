@@ -459,14 +459,23 @@ async def cmd_backup(message: Message, bot: Bot) -> None:
     status_msg = await message.reply("📦 Делаю бэкап...")
     try:
         path = await send_backup(bot, manual=True)
-        if path:
+        if not path:
+            await status_msg.edit_text("⚠️ Бэкап отключён в настройках.")
+            return
+        if settings.backup_chat_id:
             await status_msg.edit_text(
-                f"✅ Бэкап отправлен в backup-чат.\n"
+                f"✅ Бэкап отправлен в чат <code>{settings.backup_chat_id}</code>.\n"
                 f"Локально: <code>{escape(str(path))}</code>",
                 parse_mode="HTML",
             )
         else:
-            await status_msg.edit_text("⚠️ Бэкап отключён в настройках.")
+            await status_msg.edit_text(
+                f"✅ Бэкап сохранён локально: <code>{escape(str(path))}</code>\n"
+                f"ℹ️ <code>BACKUP_CHAT_ID</code> не задан — в Telegram не отправляю. "
+                f"Чтобы получать бэкап сообщением — настрой через "
+                f"<code>/setcfg backup_chat_id ID</code> или <code>/menu → 📦 Бэкап</code>.",
+                parse_mode="HTML",
+            )
     except Exception as e:
         logger.error("manual backup failed: %s", e)
         await status_msg.edit_text(f"❌ Ошибка: <code>{escape(str(e))}</code>",
