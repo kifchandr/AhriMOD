@@ -1,304 +1,324 @@
-# Установка и настройка Ahrimod
+# Установка Ahrimod на Ubuntu сервере
 
-Бот устанавливается в **`/root/AhriMOD`** одной командой. Дальнейшие обновления — через `sudo ahrimod-update`. Поведенческие настройки меняются на лету прямо в Telegram через `/menu`.
+Инструкция для **Ubuntu 22.04 LTS / 24.04 LTS**. На других дистрибутивах принципы те же, могут отличаться имена пакетов.
 
-> **Почему `/root/AhriMOD` и запуск от root?**
-> `/root/` — это домашняя директория суперпользователя, доступна только root (chmod 700). Это упрощает права — не нужен отдельный системный пользователь, не нужно настраивать SELinux/sandbox. Бот делает только исходящие запросы к Telegram API и не открывает сетевых портов, так что запуск от root не открывает дополнительных векторов атаки (если кто-то получит токен — он и без root-прав сможет писать в чат). Если нужна более жёсткая изоляция — лучший вариант ставить в `/opt/ahrimod` под отдельным пользователем, см. в комментариях `install.sh`.
+Бот разворачивается в `/root/AhriMOD`, работает:
+- от пользователя **root** (проект лежит в `/root`)
+- через **systemd** (автозапуск при загрузке, автоматический перезапуск при сбоях)
+- в **изолированном venv** (`/root/AhriMOD/venv`, без конфликтов с системным Python)
+- логи — в **journald** (`journalctl -u ahrimod`)
 
-Поддерживается **Ubuntu 22.04 / 24.04 LTS**.
+Репозиторий: `https://github.com/kifchandr/AhriMOD`
 
 ---
 
-## 0. Настройка в Telegram (до установки)
+## ⚡ Быстрое обновление с GitHub
 
-### 0.1. Создать бота через `@BotFather`
+Если бот уже установлен и `/root/AhriMOD` — это git-клон, обновление сводится к трём командам:
 
-1. `/newbot` → задать имя и username → получить **`BOT_TOKEN`**
-2. `/setprivacy` → выбрать бота → **`Disable`**
-   Без этого бот не будет видеть обычные сообщения в группах.
+```bash
+cd /root/AhriMOD
+systemctl stop ahrimod
+git pull
+
+# только если менялись зависимости (requirements.txt):
+venv/bin/pip install -r requirements.txt
+
+systemctl start ahrimod
+journalctl -u ahrimod -f       # убедиться, что поднялся без ошибок
+```
+
+Миграции БД (новые колонки) применяются автоматически при старте — руками базу трогать не нужно, данные не теряются.
+
+> **Важно:** `.env`, `data/` и `venv/` должны быть в `.gitignore`, иначе `git pull` может их затронуть. Проверь, что в репозитории есть `.gitignore` со строками:
+> ```
+> .env
+> venv/
+> data/
+> __pycache__/
+> *.pyc
+> *.db
+> *.db-wal
+> *.db-shm
+> ```
+> Если `.env` или `data/` уже попали в репозиторий, перестань их отслеживать (на машине с доступом на push):
+> ```bash
+> git rm --cached .env
+> git rm -r --cached data venv
+> git add .gitignore && git commit -m "Stop tracking secrets and data" && git push
+> ```
+> Если `.env` лежал в публичном репозитории — токен скомпрометирован, отзови его в `@BotFather` → `/revoke` и впиши новый в `.env`.
+
+Если `/root/AhriMOD` ещё **не** git-клон — см. раздел [«Заливаем код проекта»](#2-заливаем-код-проекта) ниже.
+
+---
+
+## 0. Настройка в Telegram (до того как ставить на сервер)
+
+Эти шаги нужны независимо от того, где будет крутиться бот.
+
+### 0.1. Создать бота
+
+У `@BotFather`:
+- `/newbot` → задать имя и username → получить **BOT_TOKEN** (он пойдёт в `.env`)
+- `/setprivacy` → выбрать своего бота → **Disable**. Без этого бот не увидит обычные сообщения в группах.
 
 ### 0.2. Создать админский чат
 
-- Создай отдельную **группу для модераторов**, добавь туда бота
-- Узнай её ID: переслать любое сообщение в `@userinfobot`
-- Это будет **`ADMIN_CHAT_ID`**
+Понадобится приватный чат куда бот будет слать сообщения на ручную модерацию. Создай отдельную **группу** (можно из 2-3 человек — модераторы), добавь туда бота. Узнай её ID (например, переслав сообщение из неё в `@userinfobot`). Это **ADMIN_CHAT_ID**.
 
-Если группа — **форум с темами**, нужен ещё `ADMIN_CHAT_THREAD_ID`. URL темы в Telegram-вебе: `t.me/c/<chat_id>/<thread_id>` — последнее число.
+Туда же удобно слать audit-лог — тогда `LOG_CHAT_ID` ставится тем же значением.
+
+> Если у админ-чата включены **Темы** (форум) и ты хочешь постить в конкретную тему — укажи её ID в `ADMIN_CHAT_THREAD_ID`. Если темы не используешь, оставь `0`, иначе все отправки в админ-чат будут падать с `message thread not found`.
 
 ### 0.3. Добавить бота в модерируемые чаты
 
-Бот должен быть **админом** в каждом чате который модерирует, с правами:
+Бота нужно добавить **админом** в каждый чат, который он будет модерировать. Минимально нужные права:
 
-- ✅ Delete Messages
-- ✅ Ban Users
-- ✅ Restrict Users
+- **Delete Messages** — удалять спам
+- **Ban Users** — банить нарушителей
+- **Restrict Users** — мутить (если `NEW_USER_PUNISHMENT=mute` в конфиге)
 
-| Структура чата | Что писать в `PROTECTED_CHAT_IDS` |
+**Сколько чатов добавлять — зависит от структуры:**
+
+| Что у тебя | Куда добавлять бота | Что писать в `PROTECTED_CHAT_IDS` |
+|---|---|---|
+| Одна **супергруппа с темами** (форум, разделы внутри) | Один раз в саму группу, как админа | Один ID этой группы |
+| **Канал + группа обсуждений** (комментарии) | Только в **группу обсуждений** как админа | ID группы обсуждений |
+| **Несколько отдельных групп** | В каждую как админа | Все ID через запятую |
+
+ID супергруппы выглядит как `-100xxxxxxxxxx` (10–13 цифр после `-100`). Узнать его проще всего, переслав сообщение из чата в `@userinfobot` или `@getidsbot`.
+
+### 0.4. Узнать свой Telegram ID
+
+Чтобы быть админом бота, нужно знать свой `user_id` — пиши `@userinfobot`, он скажет. Это число пойдёт в `ADMIN_USER_IDS`.
+
+Все ID и токен сложи в блокнот — пригодятся при заполнении `.env` на шаге 4.
+
+---
+
+## 1. Подготовка сервера
+
+Подключаемся по SSH под root:
+
+```bash
+ssh root@your-server-ip
+```
+
+Обновляем систему и ставим зависимости:
+
+```bash
+apt update && apt upgrade -y
+apt install -y python3 python3-venv python3-pip git nano
+```
+
+Проверяем версию Python — нужна **3.10+** (в Ubuntu 22.04 идёт 3.10, в 24.04 — 3.12):
+
+```bash
+python3 --version
+```
+
+---
+
+## 2. Заливаем код проекта
+
+Вариант **A** (через git — рекомендуется, так потом обновляться одной командой):
+
+```bash
+git clone https://github.com/kifchandr/AhriMOD.git /root/AhriMOD
+```
+
+Вариант **B** (через scp с твоей машины):
+
+```bash
+# на ЛОКАЛЬНОЙ машине, в папке где лежит ahrimod.zip:
+scp ahrimod.zip root@your-server-ip:/tmp/
+
+# на СЕРВЕРЕ:
+apt install -y unzip
+unzip /tmp/ahrimod.zip -d /tmp/
+cp -r /tmp/ahrimod/. /root/AhriMOD/
+rm -rf /tmp/ahrimod /tmp/ahrimod.zip
+```
+
+---
+
+## 3. Создаём venv и ставим зависимости
+
+```bash
+python3 -m venv /root/AhriMOD/venv
+/root/AhriMOD/venv/bin/pip install --upgrade pip
+/root/AhriMOD/venv/bin/pip install -r /root/AhriMOD/requirements.txt
+```
+
+Проверим, что бот импортируется без ошибок:
+
+```bash
+cd /root/AhriMOD && venv/bin/python -c "from bot.config import Settings; print('OK')"
+```
+
+(Эта команда упадёт с ошибкой про отсутствие BOT_TOKEN — это нормально, мы ещё не создали `.env`. Главное чтобы не было `ImportError`.)
+
+---
+
+## 4. Настраиваем `.env`
+
+```bash
+cp /root/AhriMOD/.env.example /root/AhriMOD/.env
+nano /root/AhriMOD/.env
+```
+
+Заполняем все нужные поля (`BOT_TOKEN`, `ADMIN_CHAT_ID`, `PROTECTED_CHAT_IDS`, `ADMIN_USER_IDS` и т.д.).
+
+После сохранения ограничиваем права на файл — там токен бота:
+
+```bash
+chmod 600 /root/AhriMOD/.env
+```
+
+---
+
+## 5. Создаём папку для БД
+
+```bash
+mkdir -p /root/AhriMOD/data
+```
+
+(При первом запуске SQLite сам создаст файл `data/bot.db`.)
+
+---
+
+## 6. Тестовый запуск (вручную)
+
+Прежде чем ставить в автозапуск, проверим что бот стартует. **Важно**: перед запуском от руки нужно сменить cwd на папку проекта, иначе `.env` будет искаться в твоём домашнем каталоге. Через systemd этого делать не нужно — у unit-файла прописан `WorkingDirectory`.
+
+```bash
+cd /root/AhriMOD && venv/bin/python main.py
+```
+
+В логах должны появиться строки про подключение к БД и `Бот запущен`. Останавливаем по `Ctrl+C`.
+
+Если есть ошибки — правим `.env` или код, прежде чем идти дальше.
+
+---
+
+## 7. Устанавливаем systemd unit
+
+В репозитории лежит готовый файл `ahrimod.service` (уже настроен на `/root/AhriMOD`, root и venv). Копируем его в systemd:
+
+```bash
+cp /root/AhriMOD/ahrimod.service /etc/systemd/system/ahrimod.service
+systemctl daemon-reload
+```
+
+Включаем автозапуск при перезагрузке сервера и стартуем:
+
+```bash
+systemctl enable ahrimod
+systemctl start ahrimod
+```
+
+Проверяем что бот живой:
+
+```bash
+systemctl status ahrimod
+```
+
+Должно быть `Active: active (running)`.
+
+---
+
+## 8. Просмотр логов
+
+Все `print` и `logging` бота уходят в journald:
+
+```bash
+# последние логи
+journalctl -u ahrimod -n 100
+
+# в реальном времени (как tail -f)
+journalctl -u ahrimod -f
+
+# только за последний час
+journalctl -u ahrimod --since "1 hour ago"
+
+# только ошибки
+journalctl -u ahrimod -p err
+```
+
+---
+
+## 9. Управление сервисом
+
+| Команда | Что делает |
 |---|---|
-| Супергруппа с темами (форум) | Один ID группы |
-| Канал + группа обсуждений | ID **группы обсуждений** |
-| Несколько отдельных групп | Все ID через запятую |
-
-### 0.4. Узнать свой `user_id`
-
-Пиши `@userinfobot` — он скажет. Это число пойдёт в `ADMIN_USER_IDS`.
-
----
-
-## 1. Установка одной командой
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/kifchandr/AhriMOD/master/install.sh -o /tmp/install.sh
-sudo bash /tmp/install.sh
-```
-
-Скрипт за тебя:
-
-- Поставит `python3`, `python3-venv`, `git`, `rsync`, `sqlite3`
-- Клонирует репо в **`/root/AhriMOD`**
-- Создаст `venv` и установит зависимости
-- Создаст `.env` из шаблона (если ещё нет)
-- Установит systemd unit `ahrimod.service`
-- Установит команду `/usr/local/bin/ahrimod-update`
-
-В конце выведет цветной чек-лист дальнейших шагов.
-
-## 2. Заполнить `.env`
-
-```bash
-sudo nano /root/AhriMOD/.env
-```
-
-В `.env` только **базовые** параметры — то, что нужно для соединения:
-
-```ini
-BOT_TOKEN=8123:AAxx...
-ADMIN_CHAT_ID=-1003707823690
-ADMIN_CHAT_THREAD_ID=5030
-LOG_CHAT_ID=-1003707823690
-LOG_CHAT_THREAD_ID=5030
-PROTECTED_CHAT_IDS=-1003375282506
-ADMIN_USER_IDS=2076994518
-DB_PATH=./data/bot.db
-```
-
-Все остальные параметры (пороги предупреждений, бэкап, FAQ-кулдаун, эскалация и т.д.) имеют разумные дефолты и **меняются прямо в Telegram** через `/menu`.
-
-## 3. Запуск
-
-```bash
-sudo systemctl enable --now ahrimod
-sudo journalctl -u ahrimod -n 30 --no-pager -o cat
-```
-
-В логе должно быть:
-
-```
-✓ ADMIN_CHAT_ID = -1003707823690 (...)
-✓ PROTECTED_CHAT_IDS[-1003375282506] = ...
-Бот запущен
-Run polling for bot @YourBot_bot ...
-```
-
-Логи теперь цветные — благодаря `FORCE_COLOR=1` в systemd unit и rich-handler в Python. Если красные `✗` — бот не видит этот чат: либо ID неверный, либо бот туда не добавлен.
+| `systemctl start ahrimod` | Запустить |
+| `systemctl stop ahrimod` | Остановить |
+| `systemctl restart ahrimod` | Перезапустить |
+| `systemctl status ahrimod` | Проверить статус |
+| `systemctl enable ahrimod` | Включить автозапуск при загрузке |
+| `systemctl disable ahrimod` | Выключить автозапуск |
 
 ---
 
-## 4. Настройка через бот
+## 10. Обновление бота
 
-В любом чате где бот видит твои сообщения:
-
-### Меню
-
-```
-/menu
-```
-
-Открывается inline-меню с шестью группами:
-
-```
-⚙️ Настройки бота
-[🛡 Доверие]
-[🔍 Фильтры]
-[⚠️ Предупреждения]
-[🔨 Наказания новичков]
-[📦 Бэкап]
-[🔧 Прочее]
-```
-
-Внутри группы:
-- **Bool-настройка** (например `notify_on_warn`) — клик переключает Вкл/Выкл сразу
-- **Числовая/текстовая** (например `warn_ban_at`) — клик запрашивает новое значение, ты пишешь его сообщением
-
-Маркер `📝` рядом с настройкой = переопределена через бота (хранится в БД). Без маркера = из `.env` или код-дефолт.
-
-### Текстовые команды
-
-```
-/config                    — все настройки с пометками
-/setcfg warn_ban_at 10     — изменить значение
-/resetcfg warn_ban_at      — сбросить к .env-дефолту
-```
-
-### Базовые списки
-
-Минимум — разрешить `t.me` и забанить пару конкурирующих сервисов:
-
-```
-/addgooddomain t.me
-/addgooddomain ahrivpn.com
-/addbandomain nordvpn.com
-/addbanword nordvpn
-/addbanword surfshark
-```
-
-### FAQ-автоответы
-
-```
-/addfaq как настроить, настройка vpn :: 1. Скачай конфиг → 2. Импорт в WireGuard → 3. Готово
-/addfaq цена, стоимость, сколько стоит :: Базовый план бесплатно, премиум — 100₽/мес
-```
-
-### Бэкап
-
-В админ-чате создай отдельную тему «Бэкапы», узнай её `thread_id`. Потом:
-
-```
-/menu → 📦 Бэкап → backup_thread_id → введи ID
-```
-
-Или быстрее:
-```
-/setcfg backup_thread_id 7890
-```
-
-Проверь:
-```
-/backup
-```
-
-Должен прилететь свежий `.db.gz`.
-
----
-
-## 5. Обновление
-
-Одной командой:
+См. блок [«⚡ Быстрое обновление с GitHub»](#-быстрое-обновление-с-github) в начале файла. Если коротко:
 
 ```bash
-sudo ahrimod-update
-```
-
-Скрипт делает:
-1. `systemctl stop ahrimod`
-2. `git pull` в `/root/AhriMOD`
-3. `pip install -r requirements.txt` (если есть новые зависимости)
-4. Обновляет systemd unit при необходимости
-5. `systemctl start ahrimod`
-6. Показывает первые 30 строк лога
-
-**Не трогает** при обновлении:
-- `.env` — твои настройки
-- `data/` — БД, бэкапы, FAQ, runtime-настройки из меню
-- `venv/` — окружение
-
-То есть переопределения настроек из `/menu` **сохраняются между обновлениями**, потому что они в БД.
-
----
-
-## 6. Откат
-
-```bash
-# Посмотреть коммиты
-git -C /root/AhriMOD log --oneline -10
-
-# Откатиться на предыдущий
-sudo systemctl stop ahrimod
-git -C /root/AhriMOD reset --hard HEAD~1
-sudo systemctl start ahrimod
-
-# Или на конкретный коммит
-git -C /root/AhriMOD reset --hard <commit-hash>
-```
-
-БД при этом не пострадает — она вне git.
-
----
-
-## 7. Бэкап и восстановление
-
-Бот ежедневно делает бэкап БД и шлёт в админ-чат (тема `BACKUP_THREAD_ID`). Локальные копии — в `/root/AhriMOD/data/backups/` за последние `BACKUP_KEEP_DAYS` дней.
-
-Скачать с сервера руками:
-```bash
-scp root@SERVER:/root/AhriMOD/data/bot.db ./bot.db.backup
-```
-
-Восстановить:
-```bash
-sudo systemctl stop ahrimod
-sudo cp ./bot-good.db /root/AhriMOD/data/bot.db
-sudo systemctl start ahrimod
+cd /root/AhriMOD
+systemctl stop ahrimod
+git pull
+# при изменении зависимостей:
+venv/bin/pip install -r requirements.txt
+systemctl start ahrimod
+systemctl status ahrimod
 ```
 
 ---
 
-## 8. Удаление
+## 11. Бэкап БД
+
+Бот сам шлёт ежедневный бэкап БД в Telegram (см. `BACKUP_*` в `.env`). Дополнительно можно держать локальные копии через cron.
+
+База — обычный SQLite-файл в `/root/AhriMOD/data/bot.db`. Простейший бэкап через cron:
 
 ```bash
-sudo systemctl disable --now ahrimod
-sudo rm /etc/systemd/system/ahrimod.service
-sudo rm /usr/local/bin/ahrimod-update
-sudo rm -rf /root/AhriMOD
-sudo systemctl daemon-reload
+crontab -e
+```
+
+Добавляем строку (бэкап каждый день в 4:00 в `/var/backups/ahrimod/`):
+
+```cron
+0 4 * * * mkdir -p /var/backups/ahrimod && sqlite3 /root/AhriMOD/data/bot.db ".backup '/var/backups/ahrimod/bot-$(date +\%F).db'" && find /var/backups/ahrimod -name 'bot-*.db' -mtime +30 -delete
+```
+
+(Хранит бэкапы 30 дней, потом удаляет старые.) Если `sqlite3` не установлен:
+
+```bash
+apt install -y sqlite3
 ```
 
 ---
 
-## 9. Решение проблем
+## Решение типичных проблем
 
-### `Permission denied: '.env'`
+**`status` показывает `failed`, в логах `BOT_TOKEN` не задан.**
+Не отредактирован `.env` или его не видно. Проверь, что файл лежит в `/root/AhriMOD/.env` и `chmod 600 /root/AhriMOD/.env`.
 
-При ручном запуске вне systemd сделай `cd /root/AhriMOD` перед `python main.py`. Через systemd этой проблемы нет.
+**Бот стартует, но не видит сообщения в группе.**
+В BotFather вызови `/setprivacy` для своего бота и выбери `Disable`. Затем убери и заново добавь бота в чат и перезапусти сервис.
 
-### `✗ ADMIN_CHAT_ID = ...: chat not found`
+**Бот не может удалять сообщения / банить.**
+Сделай бота админом нужного чата с правами «Удалять сообщения» и «Банить пользователей».
 
-Бота нет в этом чате — добавь. Проверка напрямую:
+**В логах `message thread not found`, модерация не доходит до админ-чата.**
+В `.env` `ADMIN_CHAT_THREAD_ID` (или `LOG_CHAT_THREAD_ID`) указывает на несуществующую тему форума. Поставь `0`, если не используешь темы, либо впиши ID реально существующей открытой темы. После правки — `systemctl restart ahrimod`.
+
+**Сервис не стартует после смены `ExecStart`.**
+Проверь, что путь к интерпретатору верный: при venv это `/root/AhriMOD/venv/bin/python`. Сверь с `systemctl cat ahrimod`.
+
+**Хочу видеть, что бот сделал последние сутки.**
 ```bash
-TOKEN=$(grep ^BOT_TOKEN= /root/AhriMOD/.env | cut -d= -f2)
-curl -s "https://api.telegram.org/bot${TOKEN}/getChat?chat_id=-100xxx" | python3 -m json.tool
+journalctl -u ahrimod --since "24 hours ago" | less
 ```
-
-### Команды бота не работают в модерируемом чате
-
-Скорее всего privacy mode не применился. Удали бота из чата и добавь заново сразу как админа.
-
-### Лог белый, цветов нет
-
-Проверь что в `/etc/systemd/system/ahrimod.service` есть строки:
-```ini
-Environment=FORCE_COLOR=1
-Environment=TERM=xterm-256color
-```
-Если нет — `sudo cp /root/AhriMOD/ahrimod.service /etc/systemd/system/ && sudo systemctl daemon-reload && sudo systemctl restart ahrimod`.
-
-### Бот падает при старте
-
-```bash
-sudo journalctl -u ahrimod -n 100 --no-pager -o cat
-```
-
-Найди `ERROR` или `Traceback`. Если непонятно — создай issue в репозитории.
-
----
-
-## Команды на каждый день
-
-| Что | Команда |
-|---|---|
-| Обновить из GitHub | `sudo ahrimod-update` |
-| Статус | `sudo systemctl status ahrimod` |
-| Логи в реальном времени | `sudo journalctl -u ahrimod -f` |
-| Перезапустить | `sudo systemctl restart ahrimod` |
-| Поменять `.env` | `sudo nano /root/AhriMOD/.env && sudo systemctl restart ahrimod` |
-| Поменять настройку в боте | `/menu` или `/setcfg key value` |
