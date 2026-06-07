@@ -8,7 +8,14 @@ from html import escape
 from typing import Optional, Tuple
 
 from aiogram import Bot, F, Router
-from aiogram.types import ChatMemberUpdated, User
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import (
+    CallbackQuery,
+    ChatMemberUpdated,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    User,
+)
 
 from ..config import settings
 from ..db.repositories import AuditRepo, UserRepo
@@ -106,6 +113,44 @@ async def _notify_new_member(bot: Bot, user: User) -> None:
         logger.warning("notify_new_member send failed: %s", e)
 
 
+async def _send_name_review(bot: Bot, event: ChatMemberUpdated, user: User) -> None:
+    """
+    Вместо авто-бана за ссылку в имени — отправляет карточку в админ-чат
+    с кнопками «Забанить» / «Оставить». Пользователь остаётся в чате до решения.
+    """
+    user_str = fmt_user(user.id, user.full_name, user.username)
+    text = (
+        f"⚠️ <b>Ссылка в имени нового участника</b>\n"
+        f"👤 {user_str}\n"
+        f"🆔 <code>{user.id}</code>\n"
+        f"💬 Чат: <code>{escape(event.chat.title or str(event.chat.id))}</code>\n"
+        f"\nПользователь оставлен в чате до решения модератора."
+    )
+    keyboard = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="🔨 Забанить",
+                    callback_data=f"joinmod:ban:{user.id}:{event.chat.id}",
+                ),
+                InlineKeyboardButton(
+                    text="✅ Оставить",
+                    callback_data=f"joinmod:keep:{user.id}:{event.chat.id}",
+                ),
+            ]
+        ]
+    )
+    kwargs: dict = {"parse_mode": "HTML", "reply_markup": keyboard}
+    if settings.admin_chat_thread_id:
+        kwargs["message_thread_id"] = settings.admin_chat_thread_id
+
+    try:
+        await bot.send_message(settings.admin_chat_id, text, **kwargs)
+        await AuditRepo.log(None, user.id, "review", "spam_in_name → ручная модерация")
+    except Exception as e:
+        logger.error("name-review send failed: %s", e)
+
+
 @router.chat_member(F.chat.id.in_(settings.protected_chat_ids))
 async def on_chat_member(event: ChatMemberUpdated, bot: Bot) -> None:
     # Интересуют только переходы в "пришёл в чат"
@@ -142,20 +187,10 @@ async def on_chat_member(event: ChatMemberUpdated, bot: Bot) -> None:
             except Exception as e:
                 logger.error("CAS ban failed: %s", e)
 
-    # 2) Проверка имени на ссылки
+    # 2) Проверка имени на ссылки — НЕ баним, отправляем на ручную модерацию.
     if _name_looks_like_spam(user.first_name or "", user.last_name or "", user.username or ""):
-        try:
-            await bot.ban_chat_member(event.chat.id, user.id)
-            await UserRepo.set_banned(user.id, True)
-            await AuditRepo.log(None, user.id, "ban", "spam_in_name")
-            await log_to_channel(
-                bot,
-                f"🛡 Бан за ссылку в имени: <code>{user.id}</code> "
-                f"({user.full_name} / @{user.username})",
-            )
-            return
-        except Exception as e:
-            logger.error("name-ban failed: %s", e)
+        await _send_name_review(bot, event, user)
+        return
 
     # 3) Уведомление о новом участнике — один раз на аккаунт.
     #    try_mark_welcomed атомарно вернёт True лишь при первом вступлении, поэтому
@@ -164,3 +199,51 @@ async def on_chat_member(event: ChatMemberUpdated, bot: Bot) -> None:
     #    не удаляется), так что одного и того же человека не приветствуем дважды.
     if settings.notify_on_new_member and await UserRepo.try_mark_welcomed(user.id):
         await _notify_new_member(bot, user)
+
+
+@router.callback_query(F.data.startswith("joinmod:"))
+async def on_joinmod_callback(cb: CallbackQuery, bot: Bot) -> None:
+    """Кнопки из карточки «ссылка в имени»: ban / keep. Только для модераторов."""
+    if cb.data is None or cb.from_user is None:
+        return
+    if cb.from_user.id not in settings.admin_user_ids:
+        await cb.answer("Только для модераторов", show_alert=True)
+        return
+
+    try:
+        _, action, uid_s, cid_s = cb.data.split(":", 3)
+        target_user_id = int(uid_s)
+        chat_id = int(cid_s)
+    except ValueError:
+        await cb.answer("Битый callback")
+        return
+
+    if action == "ban":
+        try:
+            await bot.ban_chat_member(chat_id, target_user_id)
+            await UserRepo.set_banned(target_user_id, True)
+            await AuditRepo.log(cb.from_user.id, target_user_id, "ban", "spam_in_name (ручной)")
+            summary = f"🔨 Забанен <code>{target_user_id}</code>"
+        except Exception as e:
+            logger.error("joinmod ban failed: %s", e)
+            await cb.answer("Не удалось забанить (проверь права бота)", show_alert=True)
+            return
+    elif action == "keep":
+        await AuditRepo.log(cb.from_user.id, target_user_id, "review_ignore", "spam_in_name оставлен")
+        summary = f"✅ Оставлен <code>{target_user_id}</code>"
+    else:
+        await cb.answer("Неизвестное действие")
+        return
+
+    # Обновляем карточку: убираем кнопки, дописываем итог и кто решил.
+    try:
+        if cb.message:
+            new_text = (
+                (cb.message.html_text or "")
+                + f"\n\n<b>{summary}</b>\n👮 {escape(cb.from_user.full_name)}"
+            )
+            await cb.message.edit_text(new_text, reply_markup=None, parse_mode="HTML")
+    except TelegramBadRequest:
+        pass
+
+    await cb.answer("Готово")
