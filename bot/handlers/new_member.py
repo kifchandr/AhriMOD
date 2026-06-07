@@ -157,5 +157,10 @@ async def on_chat_member(event: ChatMemberUpdated, bot: Bot) -> None:
         except Exception as e:
             logger.error("name-ban failed: %s", e)
 
-    # 3) Уведомление о новом участнике (опционально)
-    await _notify_new_member(bot, user)
+    # 3) Уведомление о новом участнике — один раз на аккаунт.
+    #    try_mark_welcomed атомарно вернёт True лишь при первом вступлении, поэтому
+    #    повторные входы и дубли chat_member-апдейтов больше не плодят сообщений.
+    #    Флаг welcomed постоянный и при перезаходе не сбрасывается (запись юзера
+    #    не удаляется), так что одного и того же человека не приветствуем дважды.
+    if settings.notify_on_new_member and await UserRepo.try_mark_welcomed(user.id):
+        await _notify_new_member(bot, user)

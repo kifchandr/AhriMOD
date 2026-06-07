@@ -257,6 +257,25 @@ class UserRepo:
         )
         await db.conn.commit()
 
+    @staticmethod
+    async def try_mark_welcomed(user_id: int) -> bool:
+        """
+        Атомарно помечает, что уведомление о вступлении для юзера уже отправлено.
+
+        Возвращает True ТОЛЬКО при первом вызове (когда welcomed был 0); при всех
+        последующих — False. За счёт условия `AND welcomed = 0` в самом UPDATE это
+        защищает сразу от двух источников дублей: повторных входов пользователя
+        и повторной доставки одного и того же chat_member-апдейта Telegram'ом.
+
+        Запись пользователя должна уже существовать (вызывать после get_or_create).
+        """
+        cur = await db.conn.execute(
+            "UPDATE users SET welcomed = 1 WHERE user_id = ? AND welcomed = 0",
+            (user_id,),
+        )
+        await db.conn.commit()
+        return cur.rowcount > 0
+
 
 # ────────────────────────────── Домены ──────────────────────────────
 
@@ -818,40 +837,3 @@ class RecentMessagesRepo:
         )
         await db.conn.commit()
         return cur.rowcount
-
-
-# ────────────────────────────── Runtime-настройки ──────────────────────────────
-
-class SettingsRepo:
-    @staticmethod
-    async def get(key: str) -> Optional[str]:
-        async with db.conn.execute(
-            "SELECT value FROM settings WHERE key = ?", (key,)
-        ) as cur:
-            row = await cur.fetchone()
-        return row["value"] if row else None
-
-    @staticmethod
-    async def get_all() -> dict[str, str]:
-        async with db.conn.execute(
-            "SELECT key, value FROM settings"
-        ) as cur:
-            return {r["key"]: r["value"] async for r in cur}
-
-    @staticmethod
-    async def set(key: str, value: str, updated_by: Optional[int]) -> None:
-        await db.conn.execute(
-            "INSERT INTO settings(key, value, updated_at, updated_by) "
-            "VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET "
-            "value = excluded.value, updated_at = excluded.updated_at, "
-            "updated_by = excluded.updated_by",
-            (key, value, _now(), updated_by),
-        )
-        await db.conn.commit()
-
-    @staticmethod
-    async def delete(key: str) -> bool:
-        cur = await db.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
-        await db.conn.commit()
-        return cur.rowcount > 0

@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_seen          INTEGER,
     qualifying_count   INTEGER NOT NULL DEFAULT 0,  -- сколько "квалифицирующих" сообщений накоплено
     last_qualifying_at INTEGER,                     -- ts последнего квалифицирующего сообщения
-    qualified_at       INTEGER                      -- ts когда юзер набрал нужное число (точка отсчёта 24ч)
+    qualified_at       INTEGER,                     -- ts когда юзер набрал нужное число (точка отсчёта 24ч)
+    welcomed           INTEGER NOT NULL DEFAULT 0   -- 1 = уведомление о вступлении уже отправлено
 );
 
 CREATE TABLE IF NOT EXISTS domains (
@@ -130,15 +131,6 @@ CREATE TABLE IF NOT EXISTS recent_messages (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_recent_msg_created ON recent_messages(created_at);
-
--- Runtime-настройки. Значения переопределяют значения из .env / Settings.
--- Хранятся как строки, кастятся в нужный тип в RuntimeSettings.reload().
-CREATE TABLE IF NOT EXISTS settings (
-    key         TEXT PRIMARY KEY,
-    value       TEXT NOT NULL,
-    updated_at  INTEGER NOT NULL,
-    updated_by  INTEGER
-);
 """
 
 
@@ -148,6 +140,7 @@ MIGRATIONS = [
     ("users", "qualifying_count", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "last_qualifying_at", "INTEGER"),
     ("users", "qualified_at", "INTEGER"),
+    ("users", "welcomed", "INTEGER NOT NULL DEFAULT 0"),
     ("pending_reviews", "chat_thread_id", "INTEGER"),
 ]
 
