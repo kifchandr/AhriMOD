@@ -435,15 +435,17 @@ class PendingRepo:
         words: Iterable[str],
         deleted: bool,
         chat_thread_id: Optional[int] = None,
+        full_links: Iterable[str] = (),
     ) -> int:
         cur = await db.conn.execute(
             "INSERT INTO pending_reviews(chat_id, chat_thread_id, message_id, user_id, "
-            "text, domains, words, deleted, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "text, domains, words, full_links, deleted, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 chat_id, chat_thread_id, message_id, user_id, text,
                 json.dumps(list(domains), ensure_ascii=False),
                 json.dumps(list(words), ensure_ascii=False),
+                json.dumps(list(full_links), ensure_ascii=False),
                 1 if deleted else 0,
                 _now(),
             ),
@@ -489,6 +491,9 @@ class PendingRepo:
         )
         await db.conn.commit()
 
+
+# ────────────────────────────── Audit log ──────────────────────────────
+
 class SettingsRepo:
     """
     Хранение runtime-настроек, переопределяющих значения из .env.
@@ -524,6 +529,7 @@ class SettingsRepo:
     async def delete(key: str) -> None:
         await db.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
         await db.conn.commit()
+
 
 # ────────────────────────────── Audit log ──────────────────────────────
 

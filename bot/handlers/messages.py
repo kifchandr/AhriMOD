@@ -137,15 +137,23 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
     # 4. Анализируем что у нас за ссылки/слова
     blocked_domains: list[str] = []
     pending_domains: list[str] = []      # неизвестные домены — на модерацию
+    pending_full: list[str] = []         # неизвестные точные ссылки — на модерацию
     allowed_count = 0
     for link in links:
-        status = await DomainRepo.get_status(link.domain)
+        # get_status сам идёт от самого специфичного к общему: точная ссылка →
+        # wildcard → хост. Поэтому проверки полной ссылки достаточно: если
+        # заблокирован весь домен — сработает host-fallback, если заблокирована
+        # только конкретная ссылка — сработает точное совпадение.
+        status = await DomainRepo.get_status(link.full)
         if status == "blocked":
-            blocked_domains.append(link.domain)
+            blocked_domains.append(link.full)
         elif status == "allowed":
             allowed_count += 1
         else:
-            pending_domains.append(link.domain)
+            if link.domain not in pending_domains:
+                pending_domains.append(link.domain)
+            if link.full not in pending_full:
+                pending_full.append(link.full)
 
     # Стоп-слова: blocked всегда плохо, allowed для слов не предусмотрено
     # (если слово не в blocked, оно не попадёт в bad_words вообще).
@@ -230,6 +238,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
             delete_original=False,
             is_trusted=True,
             user_record=user_record,
+            full_links=pending_full,
         )
     else:
         # Новый юзер: пересылаем в админ-чат и удаляем оригинал внутри send_to_review.
@@ -241,6 +250,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
             delete_original=True,
             is_trusted=False,
             user_record=user_record,
+            full_links=pending_full,
         )
 
     # Сообщение засчитываем — иначе спамеры никогда не "перерастут" в trusted

@@ -47,10 +47,10 @@ def review_keyboard(review_id: int) -> InlineKeyboardMarkup:
         inline_keyboard=[
             [
                 InlineKeyboardButton(text="✅ Разрешить URL", callback_data=f"mod:allow:{review_id}"),
-                InlineKeyboardButton(text="🚫 Запретить URL", callback_data=f"mod:block:{review_id}"),
+                InlineKeyboardButton(text="🚫 Запретить домен", callback_data=f"mod:block:{review_id}"),
             ],
             [
-                InlineKeyboardButton(text="🔇 Игнорировать", callback_data=f"mod:ignore:{review_id}"),
+                InlineKeyboardButton(text="🔗 Запретить ссылку", callback_data=f"mod:block_link:{review_id}"),
                 InlineKeyboardButton(text="🔨 Бан + удалить", callback_data=f"mod:ban:{review_id}"),
             ],
         ]
@@ -65,6 +65,7 @@ async def send_to_review(
     delete_original: bool,
     is_trusted: bool,
     user_record,
+    full_links: Iterable[str] = (),
 ) -> int:
     """
     Пересылает сообщение в админ-чат, опционально удаляет оригинал и
@@ -79,6 +80,7 @@ async def send_to_review(
     """
     domains_list = list(domains)
     words_list = list(words)
+    full_links_list = list(full_links)
     text = message.text or message.caption or ""
 
     # ── 1. Пересылаем оригинал ──
@@ -137,6 +139,7 @@ async def send_to_review(
         words=words_list,
         deleted=deleted,
         chat_thread_id=message.message_thread_id,
+        full_links=full_links_list,
     )
 
     # ── 4. Отправляем info с кнопками ──
@@ -160,6 +163,8 @@ async def send_to_review(
     )
     if domains_list:
         info += f"🔗 Домены: <code>{escape(', '.join(domains_list))}</code>\n"
+    if full_links_list:
+        info += f"🔗 Ссылки: <code>{escape(', '.join(full_links_list))}</code>\n"
     if words_list:
         info += f"🚫 Слова: <code>{escape(', '.join(words_list))}</code>\n"
     info += f"💬 Чат: <code>{escape(message.chat.title or str(message.chat.id))}</code>"

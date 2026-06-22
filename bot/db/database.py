@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS pending_reviews (
     text            TEXT,
     domains         TEXT,
     words           TEXT,
+    full_links      TEXT,
     deleted         INTEGER NOT NULL DEFAULT 0,
     admin_msg_id    INTEGER,
     created_at      INTEGER NOT NULL,
@@ -149,6 +150,7 @@ MIGRATIONS = [
     ("users", "qualified_at", "INTEGER"),
     ("users", "welcomed", "INTEGER NOT NULL DEFAULT 0"),
     ("pending_reviews", "chat_thread_id", "INTEGER"),
+    ("pending_reviews", "full_links", "TEXT"),
 ]
 
 

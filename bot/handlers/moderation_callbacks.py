@@ -60,6 +60,7 @@ async def on_mod_callback(cb: CallbackQuery, bot: Bot) -> None:
 
     domains: list[str] = json.loads(review.get("domains") or "[]")
     words: list[str] = json.loads(review.get("words") or "[]")
+    full_links: list[str] = json.loads(review.get("full_links") or "[]")
     chat_id = review["chat_id"]
     msg_id = review["message_id"]
     target_user_id = review["user_id"]
@@ -93,6 +94,18 @@ async def on_mod_callback(cb: CallbackQuery, bot: Bot) -> None:
         summary = f"❌ Заблокировано: <code>{escape(', '.join(domains + words))}</code>"
         await AuditRepo.log(actor_id, target_user_id, "review_block",
                             f"domains={domains};words={words}")
+
+    elif action == "block_link":
+        # Блокируем ТОЧНЫЕ ссылки (хост + путь), а не весь домен.
+        # Если по какой-то причине точных ссылок нет — падать обратно на домены.
+        targets = full_links or domains
+        for link in targets:
+            await DomainRepo.set_status(link, "blocked", actor_id)
+        # удаляем сообщение если ещё висит
+        await safe_delete(bot, chat_id, msg_id)
+        summary = f"🔗 Заблокирована ссылка: <code>{escape(', '.join(targets))}</code>"
+        await AuditRepo.log(actor_id, target_user_id, "review_block_link",
+                            f"links={targets}")
 
     elif action == "ban":
         # бан + удаление + добавление сигнатуры
@@ -153,10 +166,6 @@ async def on_mod_callback(cb: CallbackQuery, bot: Bot) -> None:
                    f"\n⚠️ Предупреждение ({warns}/{settings.warn_ban_at}){suffix}")
         await AuditRepo.log(actor_id, target_user_id, "review_block_warn",
                             f"domains={domains};words={words};warns={warns}")
-
-    elif action == "ignore":
-        summary = "🔇 Проигнорировано (без действий)"
-        await AuditRepo.log(actor_id, target_user_id, "review_ignore", "")
 
     else:
         await cb.answer("Неизвестное действие")

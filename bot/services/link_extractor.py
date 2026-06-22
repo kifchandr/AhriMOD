@@ -32,7 +32,8 @@ _USERNAME_RE = re.compile(r"(?<![\w@])@([a-zA-Z][a-zA-Z0-9_]{4,31})")
 class ExtractedLink:
     """Найденная ссылка."""
     raw: str           # как было в сообщении
-    domain: str        # нормализованный домен (может быть '' если не парсится)
+    domain: str        # домен для блокировки целиком: хост или 't.me/<канал>'
+    full: str          # точная ссылка для блокировки: хост + путь (без схемы/query)
     is_telegram: bool  # это ссылка на t.me / @channel / tg://
 
 
@@ -71,27 +72,36 @@ def _telegram_channel_domain(path: str) -> str:
     return f"t.me/{first}"
 
 
-def _domain_from_url(url: str) -> str:
-    """Парсит URL и возвращает нормализованный домен.
+def _parse_url(url: str) -> tuple[str, str, bool]:
+    """Парсит URL и возвращает (domain, full, is_telegram).
 
-    Для telegram-ссылок возвращает не голый хост ('t.me'), а 't.me/<канал>',
-    чтобы модерировать конкретный канал, а не весь t.me целиком.
+      domain — для блокировки домена целиком: хост ('apps.apple.com')
+               или 't.me/<канал>' для telegram.
+      full   — для блокировки ТОЧНОЙ ссылки: хост + путь, без схемы и query
+               ('apps.apple.com/ru/app/incy/id6756943388'). Для telegram
+               совпадает с domain (на уровне канала).
+
+    Пустые строки если URL не парсится.
     """
     if not url:
-        return ""
+        return "", "", False
     # urlparse требует схему
     if "://" not in url:
         url = "http://" + url.lstrip("/")
     try:
         parsed = urlparse(url)
     except Exception:
-        return ""
+        return "", "", False
     host = normalize_domain(parsed.hostname or "")
     if not host:
-        return ""
+        return "", "", False
     if host in _TG_HOSTS or host.endswith(".t.me"):
-        return _telegram_channel_domain(parsed.path or "")
-    return host
+        channel = _telegram_channel_domain(parsed.path or "")
+        return channel, channel, True
+    # обычный домен: domain = хост, full = хост + путь (query/fragment отбрасываем)
+    path = (parsed.path or "").rstrip("/").lower()
+    full = host + path if path else host
+    return host, full, False
 
 
 def _is_telegram_domain(domain: str) -> bool:
@@ -113,56 +123,59 @@ def extract_links(message: Message) -> list[ExtractedLink]:
     entities = list(message.entities or []) + list(message.caption_entities or [])
     found: dict[tuple[str, str], ExtractedLink] = {}
 
-    def add(raw: str, domain: str, is_tg: bool) -> None:
-        key = (raw, domain)
+    def add(raw: str, domain: str, full: str, is_tg: bool) -> None:
+        key = (domain, full)
         if key not in found:
-            found[key] = ExtractedLink(raw=raw, domain=domain, is_telegram=is_tg)
+            found[key] = ExtractedLink(raw=raw, domain=domain, full=full, is_telegram=is_tg)
 
     # 1. Entities
     for ent in entities:
         if ent.type == "url":
             raw = text[ent.offset : ent.offset + ent.length]
-            domain = _domain_from_url(raw)
+            domain, full, is_tg = _parse_url(raw)
             if domain:
-                add(raw, domain, _is_telegram_domain(domain))
+                add(raw, domain, full, is_tg)
         elif ent.type == "text_link" and ent.url:
-            domain = _domain_from_url(ent.url)
+            domain, full, is_tg = _parse_url(ent.url)
             if domain:
-                add(ent.url, domain, _is_telegram_domain(domain))
+                add(ent.url, domain, full, is_tg)
         elif ent.type == "mention":
             raw = text[ent.offset : ent.offset + ent.length]  # @username
             username = raw.lstrip("@")
-            add(raw, f"t.me/{username.lower()}", True)
+            tg = f"t.me/{username.lower()}"
+            add(raw, tg, tg, True)
         elif ent.type == "text_mention" and ent.user:
-            add(f"tg://user?id={ent.user.id}", "tg.user", True)
+            add(f"tg://user?id={ent.user.id}", "tg.user", "tg.user", True)
 
     # 2. Регулярка по нормализованному тексту (ловим обфусцированное)
     normalized = normalize_for_compare(text)
     for m in _URL_RE.finditer(normalized):
         raw = m.group(0)
-        domain = _domain_from_url(raw)
+        domain, full, is_tg = _parse_url(raw)
         if domain:
-            add(raw, domain, _is_telegram_domain(domain))
+            add(raw, domain, full, is_tg)
 
     # @username упоминания через regex (если entities их не дали)
     for m in _USERNAME_RE.finditer(normalized):
         username = m.group(1).lower()
         # @admin / @everyone и подобное — пропустим короткие
-        add(f"@{username}", f"t.me/{username}", True)
+        tg = f"t.me/{username}"
+        add(f"@{username}", tg, tg, True)
 
     # 3. Forward из канала — это де-факто реклама канала
     fwd_chat = getattr(message, "forward_from_chat", None)
     if fwd_chat and getattr(fwd_chat, "username", None):
         username = fwd_chat.username.lower()
-        add(f"forward:@{username}", f"t.me/{username}", True)
+        tg = f"t.me/{username}"
+        add(f"forward:@{username}", tg, tg, True)
 
     # 4. Inline-кнопки в reply_markup
     if message.reply_markup and message.reply_markup.inline_keyboard:
         for row in message.reply_markup.inline_keyboard:
             for btn in row:
                 if btn.url:
-                    domain = _domain_from_url(btn.url)
+                    domain, full, is_tg = _parse_url(btn.url)
                     if domain:
-                        add(btn.url, domain, _is_telegram_domain(domain))
+                        add(btn.url, domain, full, is_tg)
 
     return list(found.values())
