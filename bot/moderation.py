@@ -46,15 +46,11 @@ def review_keyboard(review_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="✅ Разрешить", callback_data=f"mod:allow:{review_id}"),
+                InlineKeyboardButton(text="✅ Разрешить URL", callback_data=f"mod:allow:{review_id}"),
+                InlineKeyboardButton(text="🚫 Запретить URL", callback_data=f"mod:block:{review_id}"),
+            ],
+            [
                 InlineKeyboardButton(text="🔇 Игнорировать", callback_data=f"mod:ignore:{review_id}"),
-            ],
-            [
-                InlineKeyboardButton(text="⚠️ Только варн", callback_data=f"mod:warn:{review_id}"),
-                InlineKeyboardButton(text="❌ Заблокировать", callback_data=f"mod:block:{review_id}"),
-            ],
-            [
-                InlineKeyboardButton(text="⚠️ Блок + Варн", callback_data=f"mod:block_warn:{review_id}"),
                 InlineKeyboardButton(text="🔨 Бан + удалить", callback_data=f"mod:ban:{review_id}"),
             ],
         ]

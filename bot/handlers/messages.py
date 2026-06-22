@@ -13,6 +13,7 @@ from ..db.repositories import (
     DomainRepo,
     FaqRepo,
     MessageStatsRepo,
+    PendingRepo,
     RecentMessagesRepo,
     UserRepo,
 )
@@ -28,6 +29,23 @@ router = Router(name="messages")
 
 @router.message(F.chat.id.in_(settings.protected_chat_ids))
 async def on_message(message: Message, bot: Bot, **data) -> None:
+    await _moderate(message, bot, is_edit=False, **data)
+
+
+@router.edited_message(F.chat.id.in_(settings.protected_chat_ids))
+async def on_edited_message(message: Message, bot: Bot, **data) -> None:
+    """
+    Обработка отредактированных сообщений.
+
+    Иначе спамер может отправить чистое сообщение, а ПОТОМ дописать в него
+    ссылку/стоп-слово редактированием — и без этого хендлера бот бы ничего
+    не заметил. Прогоняем те же проверки модерации, но НЕ инкрементим
+    счётчики доверия/статистики (сообщение уже было засчитано при отправке).
+    """
+    await _moderate(message, bot, is_edit=True, **data)
+
+
+async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
     user_record = data["user_record"]
     is_admin = data["is_admin"]
 
@@ -88,6 +106,10 @@ async def on_message(message: Message, bot: Bot, **data) -> None:
 
     # 3. Если нет ни ссылок, ни стоп-слов — обычное сообщение
     if not links and not bad_words:
+        # На редактировании ничего не начисляем повторно и FAQ не дублируем —
+        # сообщение уже было обработано при отправке.
+        if is_edit:
+            return
         await UserRepo.increment_messages(
             user_record.user_id,
             trust_min_messages=settings.trust_min_messages,
@@ -176,6 +198,8 @@ async def on_message(message: Message, bot: Bot, **data) -> None:
     # ───── Кейс C: всё известно (домены в whitelist) и нет стоп-слов ─────
     if not pending_domains and not bad_words:
         # все ссылки в whitelist — пропускаем
+        if is_edit:
+            return
         await UserRepo.increment_messages(
             user_record.user_id,
             trust_min_messages=settings.trust_min_messages,
@@ -190,6 +214,12 @@ async def on_message(message: Message, bot: Bot, **data) -> None:
         return
 
     # ───── Кейс D: что-то неизвестное — на ручную модерацию ─────
+    # Если это правка и по сообщению уже есть необработанная заявка — не дублируем.
+    if is_edit and await PendingRepo.has_unresolved_for_message(
+        message.chat.id, message.message_id
+    ):
+        return
+
     if is_trusted:
         # Доверенный юзер: НЕ удаляем, только уведомляем модератора.
         # Модератор сам решит — оставить, удалить или забанить домен/слово.

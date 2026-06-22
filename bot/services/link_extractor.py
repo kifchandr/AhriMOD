@@ -36,8 +36,47 @@ class ExtractedLink:
     is_telegram: bool  # это ссылка на t.me / @channel / tg://
 
 
+# Хосты Telegram, которые мы канонизируем к 't.me', чтобы t.me / telegram.me /
+# telegram.dog и одинаковые @username совпадали между собой.
+_TG_HOSTS = {"t.me", "telegram.me", "telegram.dog"}
+
+
+def _telegram_channel_domain(path: str) -> str:
+    """
+    Для telegram-ссылки возвращает 't.me/<канал>' — привязку к конкретному
+    каналу/пользователю, а не к голому 't.me'. Номер поста отбрасывается.
+
+    Примеры:
+      https://t.me/AhriVPN/52        -> t.me/ahrivpn
+      https://t.me/AhriVPN           -> t.me/ahrivpn
+      https://t.me/s/AhriVPN         -> t.me/ahrivpn        (s/ — web-превью)
+      https://t.me/+abcXYZ           -> t.me/+abcxyz        (инвайт-ссылка)
+      https://t.me/joinchat/HASH     -> t.me/joinchat/hash  (инвайт-ссылка)
+      https://t.me/c/123456/789      -> t.me/c/123456       (приватный канал)
+      https://t.me/                  -> t.me
+    """
+    segments = [s for s in path.split("/") if s]
+    if not segments:
+        return "t.me"
+    first = segments[0].lower()
+    # web-превью: t.me/s/<канал>
+    if first == "s" and len(segments) > 1:
+        return f"t.me/{segments[1].lower()}"
+    # приватный канал по внутреннему id: t.me/c/<id>/<msg>
+    if first == "c" and len(segments) > 1:
+        return f"t.me/c/{segments[1].lower()}"
+    # инвайт через joinchat: t.me/joinchat/<hash>
+    if first == "joinchat" and len(segments) > 1:
+        return f"t.me/joinchat/{segments[1].lower()}"
+    return f"t.me/{first}"
+
+
 def _domain_from_url(url: str) -> str:
-    """Парсит URL и возвращает нормализованный домен."""
+    """Парсит URL и возвращает нормализованный домен.
+
+    Для telegram-ссылок возвращает не голый хост ('t.me'), а 't.me/<канал>',
+    чтобы модерировать конкретный канал, а не весь t.me целиком.
+    """
     if not url:
         return ""
     # urlparse требует схему
@@ -47,11 +86,18 @@ def _domain_from_url(url: str) -> str:
         parsed = urlparse(url)
     except Exception:
         return ""
-    return normalize_domain(parsed.hostname or "")
+    host = normalize_domain(parsed.hostname or "")
+    if not host:
+        return ""
+    if host in _TG_HOSTS or host.endswith(".t.me"):
+        return _telegram_channel_domain(parsed.path or "")
+    return host
 
 
 def _is_telegram_domain(domain: str) -> bool:
-    return domain in {"t.me", "telegram.me", "telegram.dog"} or domain.endswith(".t.me")
+    # domain может быть как голым хостом, так и 't.me/<канал>' — берём хост-часть.
+    host = domain.split("/", 1)[0]
+    return host in {"t.me", "telegram.me", "telegram.dog"} or host.endswith(".t.me")
 
 
 def extract_links(message: Message) -> list[ExtractedLink]:

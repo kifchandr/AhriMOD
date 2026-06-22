@@ -452,6 +452,20 @@ class PendingRepo:
         return cur.lastrowid  # type: ignore
 
     @staticmethod
+    async def has_unresolved_for_message(chat_id: int, message_id: int) -> bool:
+        """Есть ли уже необработанная заявка на это же сообщение.
+
+        Нужно при модерации правок: чтобы повторное редактирование одного и
+        того же сообщения не плодило дубликаты заявок в админ-чате.
+        """
+        async with db.conn.execute(
+            "SELECT 1 FROM pending_reviews "
+            "WHERE chat_id = ? AND message_id = ? AND resolved_at IS NULL LIMIT 1",
+            (chat_id, message_id),
+        ) as cur:
+            return await cur.fetchone() is not None
+
+    @staticmethod
     async def set_admin_msg_id(review_id: int, admin_msg_id: int) -> None:
         await db.conn.execute(
             "UPDATE pending_reviews SET admin_msg_id = ? WHERE id = ?",

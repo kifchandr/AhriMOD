@@ -125,6 +125,7 @@ async def main() -> None:
 
     # Middleware на все сообщения и callback'и
     dp.message.middleware(UserLoaderMiddleware())
+    dp.edited_message.middleware(UserLoaderMiddleware())
     dp.callback_query.middleware(UserLoaderMiddleware())
 
     # Роутеры — порядок важен: команды раньше общего обработчика сообщений
