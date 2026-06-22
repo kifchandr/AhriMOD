@@ -489,6 +489,41 @@ class PendingRepo:
         )
         await db.conn.commit()
 
+class SettingsRepo:
+    """
+    Хранение runtime-настроек, переопределяющих значения из .env.
+    Используется меню настроек бота и Settings.reload_from_db().
+    """
+
+    @staticmethod
+    async def get_all() -> dict[str, str]:
+        """Все переопределения как {key: value}."""
+        async with db.conn.execute("SELECT key, value FROM settings") as cur:
+            return {r["key"]: r["value"] async for r in cur}
+
+    @staticmethod
+    async def get(key: str) -> Optional[str]:
+        async with db.conn.execute(
+            "SELECT value FROM settings WHERE key = ?", (key,)
+        ) as cur:
+            row = await cur.fetchone()
+        return row["value"] if row else None
+
+    @staticmethod
+    async def set(key: str, value: str, updated_by: Optional[int]) -> None:
+        await db.conn.execute(
+            "INSERT INTO settings(key, value, updated_by, updated_at) "
+            "VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+            "updated_by=excluded.updated_by, updated_at=excluded.updated_at",
+            (key, value, updated_by, _now()),
+        )
+        await db.conn.commit()
+
+    @staticmethod
+    async def delete(key: str) -> None:
+        await db.conn.execute("DELETE FROM settings WHERE key = ?", (key,))
+        await db.conn.commit()
 
 # ────────────────────────────── Audit log ──────────────────────────────
 

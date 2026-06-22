@@ -131,6 +131,13 @@ CREATE TABLE IF NOT EXISTS recent_messages (
     PRIMARY KEY (chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_recent_msg_created ON recent_messages(created_at);
+
+CREATE TABLE IF NOT EXISTS settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,
+    updated_by  INTEGER,
+    updated_at  INTEGER NOT NULL
+);
 """
 
 
