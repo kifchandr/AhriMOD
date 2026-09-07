@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from html import escape
 from typing import Iterable, Optional
@@ -35,6 +36,36 @@ _LOG_KW: dict = (
 )
 
 
+# Ссылки и @упоминания в ПУБЛИЧНОМ тексте уведомления маскируются: иначе бот,
+# рассказывая всему чату за что удалено сообщение, сам публикует спам-ссылку.
+_LINK_RE = re.compile(
+    r"(?i)(?:(?:https?://|tg://)[^\s,)]+"
+    r"|(?:[a-z0-9-]+\.)+[a-z]{2,24}(?:/[^\s,)]*)?"
+    r"|@[a-zA-Z][a-zA-Z0-9_]{3,31})"
+)
+
+
+def mask_links(text: str) -> str:
+    """Заменяет любые ссылки/домены/@упоминания на «[ссылка]»."""
+    return _LINK_RE.sub("[ссылка]", text)
+
+
+def public_reason(reason: str) -> str:
+    """
+    Причина в том виде, в котором её можно показать всему чату.
+
+    Подробности (сам домен или стоп-слово) идут в скобках — при выключенном
+    WARN_REASON_PUBLIC они отбрасываются, остаётся только категория
+    («запрещённый домен»). Ссылки маскируются в любом случае.
+    """
+    text = reason
+    if not settings.warn_reason_public:
+        head = text.split(" (", 1)[0].strip()
+        if head:
+            text = head
+    return mask_links(text)
+
+
 def fmt_user(user_id: int, full_name: Optional[str], username: Optional[str]) -> str:
     name = escape(full_name or "—")
     handle = f"@{username}" if username else f"id{user_id}"
@@ -52,6 +83,10 @@ def review_keyboard(review_id: int) -> InlineKeyboardMarkup:
             [
                 InlineKeyboardButton(text="🔗 Запретить ссылку", callback_data=f"mod:block_link:{review_id}"),
                 InlineKeyboardButton(text="🔨 Бан + удалить", callback_data=f"mod:ban:{review_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="💀 В бан-лист (мгновенный бан)",
+                                     callback_data=f"mod:autoban:{review_id}"),
             ],
         ]
     )
@@ -188,6 +223,58 @@ async def send_to_review(
     return review_id
 
 
+async def ban_user(
+    bot: Bot,
+    chat_id: int,
+    chat_thread_id: Optional[int],
+    user_id: int,
+    full_name: Optional[str],
+    username: Optional[str],
+    reason: str,
+    audit_action: str = "instant_ban",
+) -> bool:
+    """
+    Мгновенный бан без учёта предупреждений и доверия (бан-лист ссылок).
+
+    Публичное уведомление — с замаскированной причиной, как и у apply_warn:
+    иначе бот сам опубликует спам-ссылку всему чату.
+    """
+    import asyncio
+
+    ok = False
+    try:
+        await bot.ban_chat_member(chat_id, user_id)
+        ok = True
+    except Exception as e:
+        logger.error("instant ban failed: %s", e)
+    await UserRepo.set_banned(user_id, True)
+    await AuditRepo.log(None, user_id, audit_action, reason)
+
+    if settings.notify_on_warn:
+        name_html = escape(full_name or str(user_id))
+        handle = f" (@{username})" if username else ""
+        user_mention = (
+            f'<a href="tg://user?id={user_id}">{name_html}</a>{escape(handle)}'
+        )
+        text = (
+            f"🔨 {user_mention} — <b>бан</b>.\n"
+            f"Причина: <i>{escape(public_reason(reason))}</i>"
+        )
+        notify_kwargs: dict = {"parse_mode": "HTML"}
+        if chat_thread_id:
+            notify_kwargs["message_thread_id"] = chat_thread_id
+        try:
+            msg = await bot.send_message(chat_id, text, **notify_kwargs)
+            if settings.warn_notification_ttl_seconds > 0:
+                asyncio.create_task(
+                    _delete_after(bot, chat_id, msg.message_id,
+                                  settings.warn_notification_ttl_seconds)
+                )
+        except Exception as e:
+            logger.warning("ban notify failed: %s", e)
+    return ok
+
+
 async def punish_new_user(bot: Bot, chat_id: int, user_id: int, reason: str) -> str:
     """
     Применяет к новому пользователю наказание из конфига (ban или mute).
@@ -316,6 +403,7 @@ async def apply_warn(
 
     # 4. Уведомление юзера в чат
     if settings.notify_on_warn:
+        reason_public = public_reason(reason)
         name_html = escape(full_name or str(user_id))
         handle = f" (@{username})" if username else ""
         user_mention = (
@@ -330,19 +418,19 @@ async def apply_warn(
             text = (
                 f"🔨 {user_mention}, набрано <b>{warns}</b> предупреждений "
                 f"(порог {settings.warn_ban_at}) — <b>бан</b>.\n"
-                f"Причина: <i>{escape(reason)}</i>{trust_note}"
+                f"Причина: <i>{escape(reason_public)}</i>{trust_note}"
             )
         elif action == "mute":
             text = (
                 f"🔇 {user_mention}, набрано <b>{warns}</b> предупреждений "
                 f"(порог {settings.warn_mute_at}) — <b>мут на "
                 f"{settings.warn_mute_hours} ч</b>.\n"
-                f"Причина: <i>{escape(reason)}</i>{trust_note}"
+                f"Причина: <i>{escape(reason_public)}</i>{trust_note}"
             )
         elif action == "reset_trust":
             text = (
                 f"⚠️ {user_mention}, твоё сообщение удалено.\n"
-                f"Причина: <i>{escape(reason)}</i>\n"
+                f"Причина: <i>{escape(reason_public)}</i>\n"
                 f"Предупреждений: <b>{warns}/{settings.warn_ban_at}</b> — "
                 f"<b>доверие сброшено</b>. Дальше {settings.warn_mute_at} = мут, "
                 f"{settings.warn_ban_at} = бан."
@@ -350,7 +438,7 @@ async def apply_warn(
         else:
             text = (
                 f"⚠️ {user_mention}, твоё сообщение удалено.\n"
-                f"Причина: <i>{escape(reason)}</i>\n"
+                f"Причина: <i>{escape(reason_public)}</i>\n"
                 f"Предупреждений: <b>{warns}/{settings.warn_ban_at}</b> "
                 f"(каждое на {settings.warn_ttl_days} дней)"
             )

@@ -127,6 +127,40 @@ async def cmd_add_ban_domain(message: Message, command: CommandObject) -> None:
     await message.reply(f"🚫 <code>{escape(domain)}</code> в блэклисте.", parse_mode="HTML")
 
 
+@router.message(Command("addautoban"))
+async def cmd_add_autoban_domain(message: Message, command: CommandObject) -> None:
+    """
+    Бан-лист: за такую ссылку сразу бан, без предупреждений и учёта доверия.
+    Форматы те же, что и у /addbandomain (домен, *.wildcard, @channel, t.me/x
+    либо точная ссылка вида example.com/path).
+    """
+    if not _is_admin_msg(message) or not command.args:
+        return
+    domain = _normalize_domain_input(command.args)
+    if not domain:
+        await message.reply("Пустой ввод.")
+        return
+    await DomainRepo.set_status(domain, "autoban", message.from_user.id)
+    await AuditRepo.log(message.from_user.id, None, "addautoban", domain)
+    await message.reply(
+        f"💀 <code>{escape(domain)}</code> в бан-листе: мгновенный бан за такую ссылку.",
+        parse_mode="HTML",
+    )
+
+
+@router.message(Command("listautoban"))
+async def cmd_list_autoban(message: Message) -> None:
+    if not _is_admin_msg(message):
+        return
+    rows = await DomainRepo.list_all("autoban")
+    if not rows:
+        await message.reply("Бан-лист пуст.")
+        return
+    lines = [f"💀 <code>{escape(d)}</code>" for d, _ in rows[:100]]
+    suffix = f"\n\n<i>+ ещё {len(rows) - 100}</i>" if len(rows) > 100 else ""
+    await message.reply("\n".join(lines) + suffix, parse_mode="HTML")
+
+
 @router.message(Command("rmdomain"))
 async def cmd_remove_domain(message: Message, command: CommandObject) -> None:
     if not _is_admin_msg(message) or not command.args:
@@ -148,7 +182,8 @@ async def cmd_list_domains(message: Message) -> None:
     if not rows:
         await message.reply("База доменов пуста.")
         return
-    lines = [f"{'✅' if s == 'allowed' else '🚫'} <code>{escape(d)}</code>" for d, s in rows[:100]]
+    icons = {"allowed": "✅", "blocked": "🚫", "autoban": "💀"}
+    lines = [f"{icons.get(s, '🚫')} <code>{escape(d)}</code>" for d, s in rows[:100]]
     suffix = f"\n\n<i>+ ещё {len(rows) - 100}</i>" if len(rows) > 100 else ""
     await message.reply("\n".join(lines) + suffix, parse_mode="HTML")
 
@@ -376,6 +411,8 @@ async def cmd_stats(message: Message) -> None:
         good = (await cur.fetchone())["c"]
     async with db.conn.execute("SELECT COUNT(*) AS c FROM domains WHERE status='blocked'") as cur:
         bad = (await cur.fetchone())["c"]
+    async with db.conn.execute("SELECT COUNT(*) AS c FROM domains WHERE status='autoban'") as cur:
+        autoban = (await cur.fetchone())["c"]
     async with db.conn.execute("SELECT COUNT(*) AS c FROM signatures") as cur:
         sigs = (await cur.fetchone())["c"]
     async with db.conn.execute("SELECT COUNT(*) AS c FROM words WHERE status='blocked'") as cur:
@@ -388,7 +425,7 @@ async def cmd_stats(message: Message) -> None:
     text = (
         f"📊 <b>Статистика</b>\n"
         f"Юзеров: <b>{users_total}</b> (бан: {banned})\n"
-        f"Доменов: ✅ {good} / 🚫 {bad}\n"
+        f"Доменов: ✅ {good} / 🚫 {bad} / 💀 {autoban}\n"
         f"Стоп-слов: <b>{bad_words}</b>\n"
         f"Сигнатур: <b>{sigs}</b>\n"
         f"На модерации: <b>{pending}</b>"
@@ -405,7 +442,9 @@ async def cmd_help(message: Message) -> None:
         "/addbanword слово — добавить стоп-слово\n"
         "/rmword слово — удалить слово из всех списков\n"
         "/addgooddomain example.com — разрешить домен (поддерживается @channel и URL)\n"
-        "/addbandomain example.com — забанить домен\n"
+        "/addbandomain example.com — забанить домен (удаление + предупреждение)\n"
+        "/addautoban example.com — бан-лист: мгновенный бан за такую ссылку\n"
+        "/listautoban — показать бан-лист\n"
         "/rmdomain example.com — удалить домен\n"
         "/listdomains — список всех доменов\n"
         "/trust (реплай) — пометить юзера доверенным\n"
@@ -446,7 +485,9 @@ async def cmd_help(message: Message) -> None:
         "• <code>example.com</code> — конкретный домен\n"
         "• <code>*.example.com</code> — wildcard\n"
         "• <code>@channel</code> или <code>t.me/channel</code> — конкретный TG-канал\n"
-        "• <code>t.me</code> — общий whitelist для всех TG-ссылок"
+        "• <code>t.me</code> — общий whitelist для всех TG-ссылок\n"
+        "\n<b>Три списка ссылок:</b>\n"
+        "✅ разрешено · 🚫 удаление + предупреждение · 💀 мгновенный бан"
     )
     await message.reply(text, parse_mode="HTML")
 

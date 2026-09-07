@@ -70,6 +70,10 @@ class Settings(BaseSettings):
     notify_on_warn: bool = Field(True, alias="NOTIFY_ON_WARN")
     # Через сколько секунд удалять уведомление о предупреждении (0 = не удалять)
     warn_notification_ttl_seconds: int = Field(60, alias="WARN_NOTIFICATION_TTL_SECONDS")
+    # Показывать ли в ПУБЛИЧНОМ уведомлении подробную причину (сам домен/слово).
+    # По умолчанию выключено: иначе бот сам публикует спам-ссылку всему чату.
+    # Ссылки и @упоминания в публичном тексте маскируются в любом случае.
+    warn_reason_public: bool = Field(False, alias="WARN_REASON_PUBLIC")
 
     # ── Бэкап БД ──
     backup_enabled: bool = Field(True, alias="BACKUP_ENABLED")
@@ -147,6 +151,7 @@ RUNTIME_FIELDS: dict[str, type] = {
     "warn_ttl_days": int,
     "notify_on_warn": bool,
     "warn_notification_ttl_seconds": int,
+    "warn_reason_public": bool,
     # Бэкап
     "backup_enabled": bool,
     "backup_chat_id": int,

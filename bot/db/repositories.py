@@ -279,6 +279,13 @@ class UserRepo:
 
 # ────────────────────────────── Домены ──────────────────────────────
 
+# Статусы домена/ссылки:
+#   allowed — в белом списке, пропускаем без модерации
+#   blocked — удалить сообщение + предупреждение (эскалация по варнам)
+#   autoban — удалить сообщение + МГНОВЕННЫЙ бан, без учёта варнов и доверия
+DOMAIN_STATUSES = ("allowed", "blocked", "autoban")
+
+
 class DomainRepo:
     @staticmethod
     async def _lookup_one(domain: str) -> Optional[str]:
@@ -326,6 +333,8 @@ class DomainRepo:
 
     @staticmethod
     async def set_status(domain: str, status: str, added_by: int) -> None:
+        if status not in DOMAIN_STATUSES:
+            raise ValueError(f"неизвестный статус домена: {status}")
         domain = domain.lower().lstrip(".")
         await db.conn.execute(
             "INSERT INTO domains(domain, status, added_by, added_at) VALUES (?, ?, ?, ?) "

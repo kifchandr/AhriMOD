@@ -18,7 +18,7 @@ from ..db.repositories import (
     UserRepo,
     WordRepo,
 )
-from ..moderation import apply_warn, safe_delete
+from ..moderation import apply_warn, ban_user, safe_delete
 from ..services.content_filter import word_filter
 from ..services.signature import signature_service
 
@@ -105,6 +105,30 @@ async def on_mod_callback(cb: CallbackQuery, bot: Bot) -> None:
         await safe_delete(bot, chat_id, msg_id)
         summary = f"🔗 Заблокирована ссылка: <code>{escape(', '.join(targets))}</code>"
         await AuditRepo.log(actor_id, target_user_id, "review_block_link",
+                            f"links={targets}")
+
+    elif action == "autoban":
+        # Ссылки — в бан-лист (💀): дальше любой, кто их пришлёт, получает
+        # мгновенный бан без предупреждений. Автора баним прямо сейчас.
+        targets = full_links or domains
+        for link in targets:
+            await DomainRepo.set_status(link, "autoban", actor_id)
+        for w in words:
+            await WordRepo.set_status(w, "blocked", actor_id)
+        await word_filter.reload()
+        await safe_delete(bot, chat_id, msg_id)
+        user_rec = await UserRepo.get_or_create(target_user_id, None, None)
+        await ban_user(
+            bot, chat_id, _thread_id_of(review), target_user_id,
+            user_rec.full_name, user_rec.username,
+            f"ссылка из бан-листа ({', '.join(targets)})",
+            audit_action="review_autoban",
+        )
+        if signature_service and text:
+            await signature_service.add(text, actor_id)
+        summary = (f"💀 В бан-лист: <code>{escape(', '.join(targets))}</code>"
+                   f"\n🔨 Забанен <code>{target_user_id}</code>")
+        await AuditRepo.log(actor_id, target_user_id, "review_autoban",
                             f"links={targets}")
 
     elif action == "ban":

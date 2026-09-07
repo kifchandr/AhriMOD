@@ -49,7 +49,7 @@ GROUPS: dict[str, tuple[str, list[str]]] = {
     "warns": ("⚠️ Предупреждения", [
         "warn_reset_trust_at", "warn_mute_at", "warn_mute_hours",
         "warn_ban_at", "warn_ttl_days",
-        "notify_on_warn", "warn_notification_ttl_seconds",
+        "notify_on_warn", "warn_notification_ttl_seconds", "warn_reason_public",
     ]),
     "punish": ("🔨 Наказания новичков", [
         "new_user_punishment", "mute_duration_minutes",

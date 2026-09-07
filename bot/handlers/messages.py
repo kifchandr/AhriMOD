@@ -17,7 +17,14 @@ from ..db.repositories import (
     RecentMessagesRepo,
     UserRepo,
 )
-from ..moderation import apply_warn, log_to_channel, punish_new_user, safe_delete, send_to_review
+from ..moderation import (
+    apply_warn,
+    ban_user,
+    log_to_channel,
+    punish_new_user,
+    safe_delete,
+    send_to_review,
+)
 from ..services import faq as faq_module
 from ..services.content_filter import word_filter
 from ..services.link_extractor import extract_links
@@ -135,6 +142,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         return
 
     # 4. Анализируем что у нас за ссылки/слова
+    autoban_domains: list[str] = []      # бан-лист — мгновенный бан
     blocked_domains: list[str] = []
     pending_domains: list[str] = []      # неизвестные домены — на модерацию
     pending_full: list[str] = []         # неизвестные точные ссылки — на модерацию
@@ -145,7 +153,9 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         # заблокирован весь домен — сработает host-fallback, если заблокирована
         # только конкретная ссылка — сработает точное совпадение.
         status = await DomainRepo.get_status(link.full)
-        if status == "blocked":
+        if status == "autoban":
+            autoban_domains.append(link.full)
+        elif status == "blocked":
             blocked_domains.append(link.full)
         elif status == "allowed":
             allowed_count += 1
@@ -162,6 +172,29 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
     has_blocked = bool(blocked_domains) or bool(bad_words and not is_trusted)
     # Доверенные с явно забаненным доменом — варн + удаление, но не бан
     has_blocked_domain = bool(blocked_domains)
+
+    # ───── Кейс A0: ссылка из бан-листа — мгновенный бан ─────
+    # Проверяется раньше всех остальных кейсов и не смотрит на доверие/варны.
+    if autoban_domains:
+        await safe_delete(bot, message.chat.id, message.message_id)
+        await ban_user(
+            bot, message.chat.id, message.message_thread_id,
+            user_record.user_id, user_record.full_name, user_record.username,
+            f"ссылка из бан-листа ({', '.join(autoban_domains)})",
+            audit_action="autoban_domain",
+        )
+        # Текст спама — в сигнатуры, чтобы ловить перепечатки от других аккаунтов
+        if signature_service and text:
+            try:
+                await signature_service.add(text, None)
+            except Exception as e:
+                logger.warning("signature add failed: %s", e)
+        await log_to_channel(
+            bot,
+            f"💀 мгновенный бан <code>{user_record.user_id}</code> за "
+            f"<code>{','.join(autoban_domains)}</code>",
+        )
+        return
 
     # ───── Кейс A: явно запрещённый домен — предупреждение всем ─────
     if has_blocked_domain:
