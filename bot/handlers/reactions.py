@@ -108,9 +108,9 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot) -> None:
             await UserRepo.set_banned(target_user_id, True)
         except Exception as e:
             logger.warning("ban via reaction failed: %s", e)
-        if text:
+        if signature_service and text:
             try:
-                await signature_service.add_signature(text, event.user.id)
+                await signature_service.add(text, event.user.id)
             except Exception as e:
                 logger.warning("signature add failed: %s", e)
         await AuditRepo.log(event.user.id, target_user_id, "react_ban", "")
