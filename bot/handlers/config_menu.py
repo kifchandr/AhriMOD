@@ -28,6 +28,11 @@ from ..db.repositories import AuditRepo
 logger = logging.getLogger(__name__)
 router = Router(name="config_menu")
 
+# Как и в admin_commands: без фильтра на уровне роутера хендлер,
+# сделавший `return` для не-админа, съедал бы событие и сообщение
+# не доходило бы до модерации (см. комментарий там же).
+router.message.filter(F.from_user.id.in_(settings.admin_user_ids))
+
 
 def _is_admin_msg(message: Message) -> bool:
     return bool(message.from_user and message.from_user.id in settings.admin_user_ids)

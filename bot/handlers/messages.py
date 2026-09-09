@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from aiogram import Bot, F, Router
 from aiogram.types import Message
@@ -70,6 +71,14 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         settings.trust_min_hours, settings.trust_min_messages
     )
 
+    # Кэш для модерации через реакции — ДО любых проверок и веток.
+    # Иначе автор известен только для «чистых» сообщений, и реакция 🔨 на
+    # сообщение со ссылкой (то есть именно на спам) не находила бы запись
+    # и молча ничего не делала.
+    await RecentMessagesRepo.add(
+        message.chat.id, message.message_id, user_record.user_id, text,
+    )
+
     # ── Блокировка медиа от недоверенных ──
     # До любых других проверок: если RESTRICT_MEDIA_FOR_UNTRUSTED включена и
     # юзер ещё не доверенный, удаляем сообщение с фото/видео/кружком/гифкой
@@ -94,17 +103,36 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
             )
             return
 
-    # 1. Проверка по сигнатурам забаненных сообщений
+    # 1. Проверка по сигнатурам забаненных сообщений.
+    # Точное совпадение (exact) — это тот же самый текст, баним сразу.
+    # Нечёткое (fuzzy) у ДОВЕРЕННОГО юзера — только удаление + предупреждение:
+    # simhash на коротких текстах грубоват, и цена ложного срабатывания
+    # (мгновенный бан старожила без карточки в админ-чате) слишком высока.
     if signature_service and text:
         match = await signature_service.check(text)
         if match:
             await safe_delete(bot, message.chat.id, message.message_id)
-            await punish_new_user(bot, message.chat.id, user_record.user_id, f"signature:{match}")
-            await log_to_channel(
-                bot,
-                f"🔨 Авто-бан по сигнатуре ({match}): "
-                f"<code>{user_record.user_id}</code>",
-            )
+            if match.startswith("fuzzy") and is_trusted:
+                warns, act = await apply_warn(
+                    bot, message.chat.id, message.message_thread_id,
+                    user_record.user_id, user_record.full_name, user_record.username,
+                    "сообщение похоже на известный спам",
+                )
+                await log_to_channel(
+                    bot,
+                    f"⚠️ Похоже на спам-сигнатуру ({escape(match)}), доверенный — "
+                    f"предупреждение <code>{user_record.user_id}</code> "
+                    f"({warns}/{settings.warn_ban_at})",
+                )
+            else:
+                await punish_new_user(
+                    bot, message.chat.id, user_record.user_id, f"signature:{match}"
+                )
+                await log_to_channel(
+                    bot,
+                    f"🔨 Авто-бан по сигнатуре ({escape(match)}): "
+                    f"<code>{user_record.user_id}</code>",
+                )
             return
 
     # 2. Извлекаем ссылки и стоп-слова
@@ -125,10 +153,6 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         await MessageStatsRepo.increment(
             user_record.user_id, message.chat.id, message.message_thread_id,
         )
-        # Кэш для модерации через реакции
-        await RecentMessagesRepo.add(
-            message.chat.id, message.message_id, user_record.user_id, text,
-        )
         # FAQ-автоответ
         if faq_module.faq_service and text:
             match = faq_module.faq_service.find(text, message.chat.id)
@@ -146,7 +170,6 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
     blocked_domains: list[str] = []
     pending_domains: list[str] = []      # неизвестные домены — на модерацию
     pending_full: list[str] = []         # неизвестные точные ссылки — на модерацию
-    allowed_count = 0
     for link in links:
         # get_status сам идёт от самого специфичного к общему: точная ссылка →
         # wildcard → хост. Поэтому проверки полной ссылки достаточно: если
@@ -158,7 +181,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         elif status == "blocked":
             blocked_domains.append(link.full)
         elif status == "allowed":
-            allowed_count += 1
+            pass  # в whitelist — ничего не делаем
         else:
             if link.domain not in pending_domains:
                 pending_domains.append(link.domain)
@@ -169,7 +192,6 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
     # (если слово не в blocked, оно не попадёт в bad_words вообще).
     # Но мы оставляем bad_words как есть — модератор решит что с ними.
 
-    has_blocked = bool(blocked_domains) or bool(bad_words and not is_trusted)
     # Доверенные с явно забаненным доменом — варн + удаление, но не бан
     has_blocked_domain = bool(blocked_domains)
 
@@ -192,7 +214,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         await log_to_channel(
             bot,
             f"💀 мгновенный бан <code>{user_record.user_id}</code> за "
-            f"<code>{','.join(autoban_domains)}</code>",
+            f"<code>{escape(','.join(autoban_domains))}</code>",
         )
         return
 
@@ -212,7 +234,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
             bot,
             f"{tag} <code>{user_record.user_id}</code> "
             f"({warns}/{settings.warn_ban_at}) за "
-            f"<code>{','.join(blocked_domains)}</code>",
+            f"<code>{escape(','.join(blocked_domains))}</code>",
         )
         return
 
@@ -232,7 +254,7 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
             bot,
             f"{tag} <code>{user_record.user_id}</code> "
             f"({warns}/{settings.warn_ban_at}) за "
-            f"<code>{','.join(bad_words)}</code>",
+            f"<code>{escape(','.join(bad_words))}</code>",
         )
         return
 
@@ -248,9 +270,6 @@ async def _moderate(message: Message, bot: Bot, is_edit: bool, **data) -> None:
         )
         await MessageStatsRepo.increment(
             user_record.user_id, message.chat.id, message.message_thread_id,
-        )
-        await RecentMessagesRepo.add(
-            message.chat.id, message.message_id, user_record.user_id, text,
         )
         return
 

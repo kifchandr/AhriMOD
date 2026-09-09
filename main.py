@@ -77,6 +77,7 @@ from bot.handlers import (
     moderation_callbacks, new_member, reactions,
 )
 from bot.middlewares.user_loader import UserLoaderMiddleware
+from bot.moderation import spawn_background
 from bot.services.content_filter import word_filter
 from bot.services.signature import init_signature_service
 from bot.utils.logger import setup_logging
@@ -152,6 +153,17 @@ async def main() -> None:
         try:
             chat = await bot.get_chat(cid)
             log.info("✓ %s = %s (%s, type=%s)", label, cid, chat.title or "—", chat.type)
+            # Посты в канале приходят апдейтом channel_post, а не message:
+            # у них нет автора-пользователя, банить и считать доверие не за кого,
+            # поэтому модерация к ним не применяется. Явно предупреждаем, иначе
+            # конфиг выглядит так, будто канал защищён.
+            if chat.type == "channel" and cid in settings.protected_chat_ids:
+                log.warning(
+                    "⚠ %s = %s (%s) — это КАНАЛ. Посты канала не модерируются "
+                    "(нет автора-пользователя). Убери его из PROTECTED_CHAT_IDS "
+                    "и оставь там только группу обсуждений.",
+                    label, cid, chat.title or "—",
+                )
         except (TelegramBadRequest, TelegramForbiddenError) as e:
             log.error("✗ %s = %s: %s", label, cid, e)
             failures.append((label, cid, str(e)))
@@ -187,7 +199,9 @@ async def main() -> None:
                     log.info("Очищено старых recent_messages: %d", removed)
             except Exception as e:
                 log.warning("recent_messages cleanup failed: %s", e)
-    asyncio.create_task(_cleanup_loop())
+    # spawn_background держит сильную ссылку на задачу: event loop хранит
+    # только слабую, и без этого GC может убить цикл прямо во время sleep.
+    spawn_background(_cleanup_loop())
 
     # Ежедневный бэкап в указанный час по UTC
     async def _backup_loop():
@@ -215,7 +229,7 @@ async def main() -> None:
                 log.info("[green]Бэкап успешно отправлен[/]")
             except Exception as e:
                 log.error("Бэкап провалился: %s", e)
-    asyncio.create_task(_backup_loop())
+    spawn_background(_backup_loop())
 
     try:
         await dp.start_polling(

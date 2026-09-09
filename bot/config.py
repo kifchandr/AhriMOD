@@ -167,6 +167,14 @@ RUNTIME_FIELDS: dict[str, type] = {
 }
 
 
+# Допустимые значения для настроек-перечислений. RUNTIME_FIELDS знает только
+# питоновский тип (str), поэтому без этой проверки `/setcfg new_user_punishment
+# bam` тихо сохранился бы в БД и переключил бан новичков на мут.
+RUNTIME_CHOICES: dict[str, tuple[str, ...]] = {
+    "new_user_punishment": ("ban", "mute"),
+}
+
+
 def _coerce(raw: str, target_type: type):
     """Преобразование строкового значения из БД к нужному типу."""
     if target_type is bool:
@@ -204,9 +212,15 @@ class RuntimeSettings:
             if target is None:
                 continue
             try:
-                new_overrides[key] = _coerce(raw, target)
+                value = _coerce(raw, target)
             except Exception:
-                pass
+                continue
+            # Мусор, записанный в БД до появления проверки, игнорируем —
+            # настройка вернётся к значению из .env, а не сломает логику.
+            choices = RUNTIME_CHOICES.get(key)
+            if choices and value not in choices:
+                continue
+            new_overrides[key] = value
         object.__setattr__(self, "_overrides", new_overrides)
         return len(new_overrides)
 
@@ -218,6 +232,11 @@ class RuntimeSettings:
             raise KeyError(f"{key} не в RUNTIME_FIELDS")
         if not isinstance(value, target):
             value = _coerce(str(value), target)
+        choices = RUNTIME_CHOICES.get(key)
+        if choices and value not in choices:
+            raise ValueError(
+                f"{key}: допустимо только {' / '.join(choices)}, получено «{value}»"
+            )
         await SettingsRepo.set(key, str(value), updated_by)
         self._overrides[key] = value
 

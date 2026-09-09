@@ -21,7 +21,7 @@ from ..config import settings
 from ..db.repositories import AuditRepo, UserRepo
 from ..moderation import fmt_user, log_to_channel
 from ..services.cas import cas_check
-from ..services.link_extractor import _URL_RE, _USERNAME_RE  # type: ignore
+from ..services.link_extractor import _USERNAME_RE, find_url_like  # type: ignore
 from ..services.text_normalizer import normalize_for_compare
 
 logger = logging.getLogger(__name__)
@@ -34,7 +34,7 @@ def _name_looks_like_spam(*parts: str) -> bool:
     if not joined:
         return False
     normalized = normalize_for_compare(joined)
-    if _URL_RE.search(normalized):
+    if find_url_like(normalized):
         return True
     if _USERNAME_RE.search(normalized):
         return True
@@ -181,7 +181,8 @@ async def on_chat_member(event: ChatMemberUpdated, bot: Bot) -> None:
                 await AuditRepo.log(None, user.id, "ban", "cas_blacklist")
                 await log_to_channel(
                     bot,
-                    f"🛡 CAS-бан при входе: <code>{user.id}</code> ({user.full_name})",
+                    f"🛡 CAS-бан при входе: <code>{user.id}</code> "
+                    f"({escape(user.full_name or '—')})",
                 )
                 return
             except Exception as e:

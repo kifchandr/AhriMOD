@@ -30,6 +30,15 @@ from ..services.backup import send_backup
 logger = logging.getLogger(__name__)
 router = Router(name="admin_commands")
 
+# ВАЖНО: фильтр на уровне роутера, а не только проверка внутри хендлеров.
+# В aiogram хендлер, который просто сделал `return`, считается обработавшим
+# событие — распространение останавливается, и сообщение не доходит до
+# роутера модерации. Без этого фильтра любой спам с префиксом-командой
+# («/help смотри t.me/spam») вообще не проверялся бы. С фильтром сообщение
+# не-админа не матчится здесь и падает дальше по цепочке роутеров.
+router.message.filter(F.from_user.id.in_(settings.admin_user_ids))
+router.edited_message.filter(F.from_user.id.in_(settings.admin_user_ids))
+
 
 def _is_admin_msg(message: Message) -> bool:
     return bool(message.from_user and message.from_user.id in settings.admin_user_ids)
@@ -235,6 +244,15 @@ async def cmd_ban(message: Message, bot: Bot) -> None:
 
 @router.message(Command("unban"))
 async def cmd_unban(message: Message, bot: Bot, command: CommandObject) -> None:
+    """
+    Разбан во ВСЕХ защищаемых чатах, а не в том, где введена команда.
+
+    Иначе `/unban <id>` из админ-чата снимал бан в самом админ-чате и отвечал
+    «разбанен», хотя в основном чате юзер оставался забанен.
+
+    Заодно списываем активные предупреждения: иначе разбаненный юзер уже стоит
+    на пороге WARN_BAN_AT и получает бан снова с первого же нарушения.
+    """
     if not _is_admin_msg(message):
         return
     user_id: int | None = None
@@ -245,13 +263,53 @@ async def cmd_unban(message: Message, bot: Bot, command: CommandObject) -> None:
     if not user_id:
         await message.reply("Реплай на юзера или /unban <id>.")
         return
-    try:
-        await bot.unban_chat_member(message.chat.id, user_id, only_if_banned=True)
-        await UserRepo.set_banned(user_id, False)
-        await AuditRepo.log(message.from_user.id, user_id, "unban", "manual")
-        await message.reply(f"✅ <code>{user_id}</code> разбанен.", parse_mode="HTML")
-    except Exception as e:
-        await message.reply(f"Ошибка: {e}")
+
+    chat_ids = list(settings.protected_chat_ids)
+    if message.chat.id not in chat_ids:
+        chat_ids.append(message.chat.id)
+
+    ok_chats: list[int] = []
+    errors: list[str] = []
+    for cid in chat_ids:
+        try:
+            await bot.unban_chat_member(cid, user_id, only_if_banned=True)
+            ok_chats.append(cid)
+        except Exception as e:
+            errors.append(f"<code>{cid}</code>: {escape(str(e))}")
+
+    await UserRepo.set_banned(user_id, False)
+    cleared = await WarnRepo.clear(user_id)
+    await AuditRepo.log(message.from_user.id, user_id, "unban",
+                        f"manual, chats={ok_chats}, warns_cleared={cleared}")
+
+    text = (
+        f"✅ <code>{user_id}</code> разбанен в чатах: <b>{len(ok_chats)}</b>\n"
+        f"Списано предупреждений: <b>{cleared}</b>"
+    )
+    if errors:
+        text += "\n⚠️ Ошибки:\n" + "\n".join(errors)
+    await message.reply(text, parse_mode="HTML")
+
+
+@router.message(Command("unwarn"))
+async def cmd_unwarn(message: Message, command: CommandObject) -> None:
+    """Списать все активные предупреждения: реплаем или /unwarn <id>."""
+    if not _is_admin_msg(message):
+        return
+    user_id: int | None = None
+    if message.reply_to_message and message.reply_to_message.from_user:
+        user_id = message.reply_to_message.from_user.id
+    elif command.args and command.args.strip().isdigit():
+        user_id = int(command.args.strip())
+    if not user_id:
+        await message.reply("Реплай на юзера или /unwarn <id>.")
+        return
+    cleared = await WarnRepo.clear(user_id)
+    await AuditRepo.log(message.from_user.id, user_id, "unwarn", str(cleared))
+    await message.reply(
+        f"✅ <code>{user_id}</code>: списано предупреждений <b>{cleared}</b>.",
+        parse_mode="HTML",
+    )
 
 
 @router.message(Command("info"))
@@ -450,7 +508,9 @@ async def cmd_help(message: Message) -> None:
         "/trust (реплай) — пометить юзера доверенным\n"
         "/untrust (реплай) — снять флаг доверия\n"
         "/ban (реплай) — забанить юзера\n"
-        "/unban (реплай или id) — разбанить\n"
+        "/unban (реплай или id) — разбанить во всех защищаемых чатах "
+        "+ списать предупреждения\n"
+        "/unwarn (реплай или id) — списать предупреждения\n"
         "/info (реплай) — досье на юзера\n"
         "/addsignature (реплай) — добавить сигнатуру по сообщению\n"
         "/stats — статистика бота\n"
@@ -472,6 +532,9 @@ async def cmd_help(message: Message) -> None:
         "\n<b>Импорт/экспорт:</b>\n"
         "/exportlists — выгрузить domains/words/faq в JSON\n"
         "/importlists (реплай на JSON) — импортировать\n"
+        "\n<b>Кнопки в карточке модерации:</b>\n"
+        "✅ разрешить URL · 🚫 запретить домен · 🔗 запретить ссылку\n"
+        "❌ блок + предупреждение · ⚠️ предупреждение · 🔨 бан · 💀 бан-лист\n"
         "\n<b>Реакции как модерация:</b>\n"
         "🚫 на сообщение → удалить\n"
         "❌ на сообщение → удалить + предупреждение\n"

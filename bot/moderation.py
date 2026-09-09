@@ -2,6 +2,7 @@
 """Общие helper-функции для модерации: отправка на ревью, наказания, audit-лог."""
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 from datetime import datetime, timedelta, timezone
@@ -14,12 +15,24 @@ from aiogram.types import (
     InlineKeyboardMarkup,
     Message,
 )
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 
 from .config import settings
 from .db.repositories import AuditRepo, PendingRepo, UserRepo
 
 logger = logging.getLogger(__name__)
+
+# Ссылки на фоновые задачи: event loop держит только слабую ссылку, поэтому
+# без своего множества задачу может собрать GC прямо во время await.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def spawn_background(coro) -> asyncio.Task:
+    """Запускает фоновую задачу и держит на неё сильную ссылку до завершения."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 # Если admin/log чат — это форум-группа с темами, в .env можно указать
 # ADMIN_CHAT_THREAD_ID/LOG_CHAT_THREAD_ID. Тогда сообщения уйдут именно
@@ -82,6 +95,10 @@ def review_keyboard(review_id: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton(text="🔗 Запретить ссылку", callback_data=f"mod:block_link:{review_id}"),
+                InlineKeyboardButton(text="❌ Блок + предупр.", callback_data=f"mod:block_warn:{review_id}"),
+            ],
+            [
+                InlineKeyboardButton(text="⚠️ Предупредить", callback_data=f"mod:warn:{review_id}"),
                 InlineKeyboardButton(text="🔨 Бан + удалить", callback_data=f"mod:ban:{review_id}"),
             ],
             [
@@ -239,8 +256,6 @@ async def ban_user(
     Публичное уведомление — с замаскированной причиной, как и у apply_warn:
     иначе бот сам опубликует спам-ссылку всему чату.
     """
-    import asyncio
-
     ok = False
     try:
         await bot.ban_chat_member(chat_id, user_id)
@@ -266,7 +281,7 @@ async def ban_user(
         try:
             msg = await bot.send_message(chat_id, text, **notify_kwargs)
             if settings.warn_notification_ttl_seconds > 0:
-                asyncio.create_task(
+                spawn_background(
                     _delete_after(bot, chat_id, msg.message_id,
                                   settings.warn_notification_ttl_seconds)
                 )
@@ -307,19 +322,23 @@ async def punish_new_user(bot: Bot, chat_id: int, user_id: int, reason: str) -> 
 
 
 async def safe_delete(bot: Bot, chat_id: int, message_id: int) -> bool:
-    """Удаляет сообщение, не падая на ошибках."""
+    """
+    Удаляет сообщение, не падая на ошибках.
+
+    Ловим весь TelegramAPIError, а не только BadRequest: если у бота сняли
+    право удалять сообщения, прилетает TelegramForbiddenError, и раньше он
+    обрывал весь пайплайн модерации — нарушитель оставался без бана и варна.
+    """
     try:
         await bot.delete_message(chat_id, message_id)
         return True
-    except TelegramBadRequest as e:
-        logger.warning("delete failed: %s", e)
+    except TelegramAPIError as e:
+        logger.warning("delete failed (chat=%s msg=%s): %s", chat_id, message_id, e)
         return False
 
 
-async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int,
-                        thread_id: Optional[int] = None) -> None:
+async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
     """Удаляет сообщение через delay секунд (для TTL-уведомлений)."""
-    import asyncio
     await asyncio.sleep(delay)
     try:
         await bot.delete_message(chat_id, message_id)
@@ -350,9 +369,6 @@ async def apply_warn(
       'mute'        — мут (+ сброс доверия выполнен)
       'ban'         — бан (+ сброс доверия выполнен)
     """
-    import asyncio
-    from datetime import datetime, timedelta, timezone
-
     from .db.repositories import WarnRepo
 
     # 1. Записываем предупреждение
@@ -450,7 +466,7 @@ async def apply_warn(
         try:
             msg = await bot.send_message(chat_id, text, **notify_kwargs)
             if settings.warn_notification_ttl_seconds > 0:
-                asyncio.create_task(
+                spawn_background(
                     _delete_after(bot, chat_id, msg.message_id,
                                   settings.warn_notification_ttl_seconds)
                 )

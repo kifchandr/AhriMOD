@@ -602,6 +602,21 @@ class WarnRepo:
             return [dict(r) async for r in cur]
 
     @staticmethod
+    async def clear(user_id: int) -> int:
+        """
+        Списывает все активные предупреждения юзера. Возвращает число списанных.
+
+        Нужно при разбане и для /unwarn: иначе юзер с warns >= WARN_BAN_AT
+        после разбана получает бан снова с первого же нарушения.
+        """
+        cur = await db.conn.execute(
+            "DELETE FROM warns WHERE user_id = ? AND expires_at > ?",
+            (user_id, _now()),
+        )
+        await db.conn.commit()
+        return cur.rowcount
+
+    @staticmethod
     async def cleanup_expired() -> int:
         """Удаляет просроченные предупреждения. Возвращает число удалённых."""
         cur = await db.conn.execute(
@@ -707,101 +722,6 @@ class ForumTopicRepo:
         if row and row["name"]:
             return row["name"]
         return f"Тема {thread_id}"
-
-
-# ────────────────────────────── FAQ ──────────────────────────────
-
-class FaqRepo:
-    @staticmethod
-    async def add(triggers: list[str], answer: str, added_by: int) -> int:
-        """triggers — список фраз (lowercase, нормализованных). answer — текст ответа."""
-        cur = await db.conn.execute(
-            "INSERT INTO faq(triggers, answer, added_by, added_at) "
-            "VALUES (?, ?, ?, ?)",
-            (json.dumps(triggers, ensure_ascii=False), answer, added_by, _now()),
-        )
-        await db.conn.commit()
-        return cur.lastrowid  # type: ignore
-
-    @staticmethod
-    async def remove(faq_id: int) -> bool:
-        cur = await db.conn.execute("DELETE FROM faq WHERE id = ?", (faq_id,))
-        await db.conn.commit()
-        return cur.rowcount > 0
-
-    @staticmethod
-    async def list_all() -> list[dict]:
-        async with db.conn.execute(
-            "SELECT id, triggers, answer, use_count, last_used FROM faq ORDER BY id"
-        ) as cur:
-            rows = await cur.fetchall()
-        result = []
-        for r in rows:
-            d = dict(r)
-            d["triggers"] = json.loads(d["triggers"])
-            result.append(d)
-        return result
-
-    @staticmethod
-    async def get(faq_id: int) -> Optional[dict]:
-        async with db.conn.execute(
-            "SELECT id, triggers, answer, use_count, last_used FROM faq WHERE id = ?",
-            (faq_id,),
-        ) as cur:
-            row = await cur.fetchone()
-        if not row:
-            return None
-        d = dict(row)
-        d["triggers"] = json.loads(d["triggers"])
-        return d
-
-    @staticmethod
-    async def mark_used(faq_id: int) -> None:
-        await db.conn.execute(
-            "UPDATE faq SET use_count = use_count + 1, last_used = ? WHERE id = ?",
-            (_now(), faq_id),
-        )
-        await db.conn.commit()
-
-
-# ────────────────────────────── Recent messages (для реакций) ──────────────────────────────
-
-class RecentMessagesRepo:
-    """
-    Хранит соответствие (chat_id, message_id) → автор + текст.
-    Нужно для модерации через реакции: когда модератор ставит 🚫/🔨 на сообщение,
-    мы должны знать автора чтобы выдать варн / бан / добавить сигнатуру.
-    """
-
-    @staticmethod
-    async def add(chat_id: int, message_id: int, user_id: int,
-                  text: Optional[str]) -> None:
-        await db.conn.execute(
-            "INSERT INTO recent_messages(chat_id, message_id, user_id, text, created_at) "
-            "VALUES (?, ?, ?, ?, ?) "
-            "ON CONFLICT(chat_id, message_id) DO NOTHING",
-            (chat_id, message_id, user_id, text, _now()),
-        )
-        await db.conn.commit()
-
-    @staticmethod
-    async def get(chat_id: int, message_id: int) -> Optional[dict]:
-        async with db.conn.execute(
-            "SELECT user_id, text, created_at FROM recent_messages "
-            "WHERE chat_id = ? AND message_id = ?",
-            (chat_id, message_id),
-        ) as cur:
-            row = await cur.fetchone()
-        return dict(row) if row else None
-
-    @staticmethod
-    async def cleanup_old(ttl_days: int) -> int:
-        cutoff = _now() - ttl_days * 86400
-        cur = await db.conn.execute(
-            "DELETE FROM recent_messages WHERE created_at < ?", (cutoff,)
-        )
-        await db.conn.commit()
-        return cur.rowcount
 
 
 # ────────────────────────────── FAQ ──────────────────────────────

@@ -24,6 +24,49 @@ _URL_RE = re.compile(
     """,
 )
 
+# Домены верхнего уровня, которым мы верим при поиске ссылок РЕГУЛЯРКОЙ.
+# Без этого списка «слово.слово» из обычной речи считается ссылкой: в чате
+# постоянно пишут config.json, main.py, app.apk, setup.exe — и сообщение
+# новичка улетало на модерацию с удалением. Ссылки, которые уже распарсил
+# сам Telegram (entities url/text_link), проверку по списку не проходят —
+# там TLD может быть любым.
+_KNOWN_TLDS = frozenset("""
+com net org info biz pro name mobi xyz top site online store shop club live life
+app dev io ai co me tv cc ws to gg gl ly link click cloud page web space website
+fun world today news blog wiki tech digital media network email chat social
+group team work agency company center city global one now zone plus vip win bet
+cash money finance credit bank trade market sale deal gift best cool best hot
+ru su рф ua by kz uz kg tj tm md am ge az lv lt ee pl cz sk hu ro bg rs hr si
+de fr it es pt nl be ch at dk se no fi is ie uk gb eu
+us ca mx br ar cl pe ve cu ai in cn jp kr hk tw sg my th vn ph id au nz
+tr il ae sa eg za ng ke ma dz tn ir pk bd lk np mm kh la mn
+xn ml tk ga cf gq pw sh st tf yt cx cd cm gs mu re fm
+edu gov mil int arpa travel museum aero coop jobs post tel asia cat
+""".split())
+
+
+def _has_known_tld(host: str) -> bool:
+    """TLD хоста есть в списке доверенных (для regex-фолбэка)."""
+    if "." not in host:
+        return False
+    return host.rsplit(".", 1)[1].lower() in _KNOWN_TLDS
+
+
+def find_url_like(text: str) -> list[str]:
+    """
+    Ищет в уже нормализованном тексте то, что выглядит как ссылка,
+    и отсеивает «слово.слово» с неизвестным TLD (config.json, main.py).
+
+    Используется и модерацией сообщений, и проверкой имени нового участника.
+    """
+    out: list[str] = []
+    for m in _URL_RE.finditer(text):
+        raw = m.group(0)
+        host = raw.split("://", 1)[-1].split("/", 1)[0].split("?", 1)[0]
+        if raw.lower().startswith(("http://", "https://", "tg://", "ftp://")) or _has_known_tld(host):
+            out.append(raw)
+    return out
+
 # username-упоминания каналов/ботов: @channel_name (минимум 5 символов как у Telegram)
 _USERNAME_RE = re.compile(r"(?<![\w@])@([a-zA-Z][a-zA-Z0-9_]{4,31})")
 
@@ -147,10 +190,11 @@ def extract_links(message: Message) -> list[ExtractedLink]:
         elif ent.type == "text_mention" and ent.user:
             add(f"tg://user?id={ent.user.id}", "tg.user", "tg.user", True)
 
-    # 2. Регулярка по нормализованному тексту (ловим обфусцированное)
+    # 2. Регулярка по нормализованному тексту (ловим обфусцированное).
+    # find_url_like отсекает «слово.слово» с неизвестным TLD — иначе
+    # обычные config.json и main.py считались бы ссылками.
     normalized = normalize_for_compare(text)
-    for m in _URL_RE.finditer(normalized):
-        raw = m.group(0)
+    for raw in find_url_like(normalized):
         domain, full, is_tg = _parse_url(raw)
         if domain:
             add(raw, domain, full, is_tg)
